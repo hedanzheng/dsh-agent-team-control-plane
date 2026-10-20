@@ -7,13 +7,15 @@
 ## 兼容性
 
 - 已验证 Host：DeepSeek Harness Desktop `0.2.1-rc.2`
-- 包：`@local/agent-team-control-plane@0.5.1`
+- 包：`@local/agent-team-control-plane@0.5.3`
 - Runtime：已验证 Host 内置 Node.js，要求支持 `node:sqlite`
 - 已验证平台：Windows Desktop / PowerShell 5.1+
 
 ## 方案 A 能力
 
-- Panel 六区：**PL Chat**、**Project**、**Agents**、**Tasks**、**Approvals**、**Activity**
+- 左侧栏提供 **Agent 团队** 入口，打开中央独立全页控制台，不再覆盖当前对话
+- 控制台六个页签：**PL 对话**、**Project**、**Agents**、**Tasks**、**Approvals**、**Activity**
+- 每个 Project 打开一条独立 PL 对话；插件会自动提交启动消息，由 DeepSeek 立即开始访谈
 - Host/SQLite 统一持久化 Charter、Agent、Task、Run、Result、Evidence、Request、Response、Review、Finding、Plan Check、Decision 与 Activity
 - Codex one-shot Worker，以 Checkpoint + 新 Run 恢复工作
 - 治理下限：`ROUTINE → AUTO`、`IMPORTANT → PL`、`CRITICAL → REVIEWER_PL`
@@ -33,7 +35,7 @@ dsh plugin add github:hedanzheng/dsh-agent-team-control-plane
 
 ```powershell
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.5.1.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.5.3.tgz' --offline
 ```
 
 插件通过 `cordis.patch.yml` 激活。安装完成后重启目标 Harness Profile。

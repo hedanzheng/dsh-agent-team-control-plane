@@ -395,7 +395,9 @@ export class AgentTeamControlPlane {
     const replacementId = id(`AGENT-${replaced.role === 'REVIEWER' ? 'REVIEWER' : 'WORKER'}`);
     const displayName = input.displayName
       ? requireString(input.displayName, 'displayName', { max: 200 })
-      : `${replaced.displayName} replacement`;
+      : replaced.role === 'REVIEWER'
+        ? 'Independent Reviewer'
+        : 'Implementation Worker';
     const at = now();
     this.store.transaction(() => {
       this.store.db.prepare("UPDATE agents SET status='REPLACED', current_task_id=NULL WHERE id=?").run(replaced.id);

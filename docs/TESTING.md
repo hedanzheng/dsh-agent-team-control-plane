@@ -14,9 +14,9 @@ The suites cover contracts, parsing, task DAG readiness, assignment serializatio
 
 ## Release artifact
 
-- Version: `0.5.1`
-- File: `local-agent-team-control-plane-0.5.1.tgz`
-- SHA-256: `47AC75AB31100269D623331C40339776F5AC3EA4AC57C5DA8BF528BE1F5412A5`
+- Version: `0.5.3`
+- File: `local-agent-team-control-plane-0.5.3.tgz`
+- SHA-256: `27696CE7162C12508AC419729C1B7C72F929ABAF7827F888688CEA30562FA7E3`
 
 Runtime databases, screenshots, profile state, and credential fingerprints are kept outside the public repository.
 

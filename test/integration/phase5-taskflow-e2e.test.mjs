@@ -183,6 +183,7 @@ test('TaskFlow §13 DAG completes NEEDS_INPUT handoff, AUTO/PL/REVIEWER_PL revie
     assert.equal(retired.status, 'REPLACED');
     assert.notEqual(replacement.id, oldWorker.id);
     assert.equal(replacement.role, 'WORKER');
+    assert.equal(replacement.displayName, 'Implementation Worker');
     assert.throws(() => fx.plane.createTask({ actor: { type: 'pl', id: state.selected.project.leadAgentId }, operationId: operation('stale'), projectId: fx.projectId, expectedProjectVersion: staleVersion, title: 'stale', goal: 'must conflict', scope: { allowed: ['src/**'], forbidden: [] }, acceptance: ['never created'], dependencies: [], controlLevel: 'IMPORTANT', reviewPolicy: 'PL' }), (error) => error.code === 'VERSION_CONFLICT');
 
     state = fx.plane.stopProject({ actor: OWNER, operationId: operation('stop'), projectId: fx.projectId, expectedVersion: state.selected.project.version, reason: 'Phase 5 acceptance completed' });
@@ -204,6 +205,14 @@ test('Phase 5 client exposes all six Host-backed views without credential or cha
     assert.match(source, new RegExp(`data-testid': '${testId}`));
   }
   assert.match(source, /fetch\(selectedProjectId/);
+  assert.match(source, /ctx\.slots\.inject\('main'/);
+  assert.match(source, /ctx\.slots\.inject\('sidebar\.panellist'/);
+  assert.doesNotMatch(source, /ctx\.slots\.inject\('shell\.overlay'/);
+  assert.doesNotMatch(source, /position:\s*'fixed'/);
+  assert.match(source, /ctx\.uiWorkspace\.openWorkspace\(/);
+  assert.match(source, /requestDraftInitialization\(/);
+  assert.match(source, /\.input\.for\(binding\.ctx\)\.submit\(\)/);
+  assert.doesNotMatch(source, /startSession\(undefined/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|process\.env|api[_-]?key|credential/i);
 });
 

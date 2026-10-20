@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.5.3 - 2026-10-20
+
+- Fixed PL conversation launch being superseded by an immediate second navigation.
+- Switched PL launch to the Host's atomic Workspace open, draft initialization, and input submission flow.
+- PL conversations now start automatically with Project context and an explicit next-step interview instead of showing an empty start page.
+- Added visible launch errors and guarded Workspace selection fallbacks.
+
+## 0.5.2 - 2026-10-20
+
+- Replaced the floating `shell.overlay` with a first-class `main` panel and a left-sidebar navigation entry.
+- Added six focused console tabs and independent scrolling so control-plane content never covers conversations.
+- Added explicit “new PL conversation” and “return to conversation” actions, and automatically opens a seeded PL conversation after Project creation.
+- Collapsed replaced-agent audit history, added two-step replacement confirmation, and kept replacement display names stable.
+
 ## 0.5.1 - 2026-10-20
 
 - Rebound stale pending Worker runtime keys to an authorized, currently available external Worker at team approval.

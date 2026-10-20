@@ -1,6 +1,6 @@
 {
   "name": "@local/agent-team-control-plane",
-  "version": "0.5.1",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "description": "Agent Team Control Plane MVP Phase 5 for DeepSeek Harness Desktop",
@@ -28,7 +28,9 @@
       "platform": "web",
       "immediately": true,
       "inject": [
-        "@deepseek-ai/dsh-client-ui-layout"
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-conversation"
       ]
     }
   },
