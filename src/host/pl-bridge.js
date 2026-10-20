@@ -56,20 +56,22 @@ function projectFor(controlPlane, projectId) {
   return controlPlane.requireProject(projectId);
 }
 
-function projectTool({ name, description, parameters, execute }) {
+function projectTool({ name, description, parameters, execute, bindParent }) {
   return defineBridgeTool({
     name,
     description,
     parameters,
     output: STRING_OUTPUT,
     async execute(args, exec) {
+      if (args.project_id && exec?.agent) bindParent?.(args.project_id, exec.agent);
       const snapshot = await execute(args, exec);
       return renderState(snapshot);
     },
   });
 }
 
-export function createPLBridgeTools({ controlPlane, coordinator, governance, store }) {
+export function createPLBridgeTools({ controlPlane, coordinator, governance, store, adapters }) {
+  const bindParent = (projectId, parent) => adapters?.bindProjectParent(projectId, parent);
   return [
     projectTool({
       name: 'agent_team_project_state',
@@ -77,6 +79,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
       parameters: {
         project_id: { type: 'string', required: true, description: 'Project ID from the PL conversation bootstrap prompt.' },
       },
+      bindParent,
       execute(args) {
         return controlPlane.snapshot(args.project_id);
       },
@@ -91,6 +94,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         constraints: { type: 'array', required: true, items: { type: 'string' } },
         success_criteria: { type: 'array', required: true, items: { type: 'string' } },
       },
+      bindParent,
       execute(args) {
         const project = projectFor(controlPlane, args.project_id);
         return controlPlane.answerInterview({
@@ -121,6 +125,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         control_level: { type: 'string', enum: ['ROUTINE', 'IMPORTANT', 'CRITICAL'] },
         review_policy: { type: 'string', enum: ['AUTO', 'PL', 'REVIEWER_PL'] },
       },
+      bindParent,
       execute(args) {
         const project = projectFor(controlPlane, args.project_id);
         return controlPlane.createTask({
@@ -146,6 +151,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         task_id: { type: 'string', required: true },
         worker_agent_id: { type: 'string' },
       },
+      bindParent,
       execute(args) {
         const project = projectFor(controlPlane, args.project_id);
         const task = controlPlane.requireTask(project, args.task_id);
@@ -172,6 +178,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         verification_commands: { type: 'array', items: { type: 'string' }, description: 'PowerShell verification commands for independent Host execution.' },
         write_intent: { type: 'boolean' },
       },
+      bindParent,
       async execute(args, exec) {
         const project = projectFor(controlPlane, args.project_id);
         const task = controlPlane.requireTask(project, args.task_id);
@@ -184,6 +191,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
           verificationCommands: (args.verification_commands ?? []).map((command) => ({ command })),
           writeIntent: args.write_intent ?? true,
           signal: exec?.signal,
+          parentAgent: exec?.agent,
         });
       },
     }),
@@ -196,6 +204,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         decision: { type: 'string', required: true, enum: ['APPROVE', 'REJECT'] },
         issues: { type: 'array', items: { type: 'string' } },
       },
+      bindParent,
       execute(args) {
         const project = projectFor(controlPlane, args.project_id);
         const task = controlPlane.requireTask(project, args.task_id);

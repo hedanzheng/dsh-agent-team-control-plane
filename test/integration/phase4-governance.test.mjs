@@ -37,6 +37,7 @@ function scanner() {
 class SequenceAdapters {
   constructor(outputs) { this.outputs = [...outputs]; this.live = new Map(); this.prompts = []; }
   describe(providerKey) { return { providerKey, adapter: 'one-shot-subagent', taskExecution: true, capabilities: { oneShot: true, sessionResume: false } }; }
+  assertCanStart() { return true; }
   async startRun(spec) { this.prompts.push(spec.prompt); this.live.set(spec.runId, spec); return { runId: spec.runId, taskId: spec.taskId, agentId: spec.agentId, runtimeRunId: `fake-${spec.runId}`, capabilities: { oneShot: true } }; }
   observeRun(runId) { return { runId, state: this.live.has(runId) ? 'RUNNING' : 'NOT_LIVE' }; }
   cancelRun() { return false; }

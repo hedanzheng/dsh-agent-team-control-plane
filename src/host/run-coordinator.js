@@ -72,6 +72,11 @@ export class TaskRunCoordinator {
     const runtime = this.controlPlane.requireUsableAuthorizedRuntime(agent.providerKey);
     const descriptor = this.adapters.describe(runtime.providerKey);
     if (!descriptor.taskExecution) throw new ControlPlaneError('RUNTIME_ROLE_UNSUPPORTED', 'assigned runtime cannot execute one-shot Worker Tasks', 409);
+    this.adapters.assertCanStart({
+      providerKey: runtime.providerKey,
+      projectId: project.id,
+      parentAgent: input.parentAgent,
+    });
     const operationId = this.controlPlane.assertNewOperation(input.operationId);
     const verificationCommands = normalizeCommands(input.verificationCommands);
     const timeoutMs = requireInteger(input.timeoutMs ?? 600000, 'timeoutMs', { min: 5000, max: 1800000 });
@@ -100,7 +105,10 @@ export class TaskRunCoordinator {
       this.store.db.prepare('UPDATE tasks SET version=version+1, updated_at=? WHERE id=?').run(createdAt, task.id);
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: 'TASK_RUN_CREATED', actor: who, objectRef: runId, summary: `Run ${runId} attempt ${attempts + 1} queued through ${descriptor.adapter}`, at: createdAt });
     });
-    const job = Promise.resolve().then(() => this.execute({ runId, project, task: this.store.getTask(task.id), agent, prompt, timeoutMs }))
+    const job = Promise.resolve().then(() => this.execute({
+      runId, project, task: this.store.getTask(task.id), agent, prompt, timeoutMs,
+      parentAgent: input.parentAgent,
+    }))
       .catch((error) => this.logger.error(`Task Run ${runId} coordinator failure: ${error instanceof Error ? error.stack ?? error.message : String(error)}`))
       .finally(() => this.jobs.delete(runId));
     this.jobs.set(runId, job);
@@ -113,7 +121,8 @@ export class TaskRunCoordinator {
     try {
       const started = await this.adapters.startRun({
         runId: spec.runId, taskId: spec.task.id, agentId: spec.agent.id,
-        providerKey: spec.agent.providerKey, cwd: spec.project.workspaceDir,
+        providerKey: spec.agent.providerKey, projectId: spec.project.id,
+        parentAgent: spec.parentAgent, cwd: spec.project.workspaceDir,
         label: `${spec.task.id}-${spec.task.title}`.slice(0, 100), prompt: spec.prompt,
       });
       runtimeStarted = true;
@@ -138,7 +147,9 @@ export class TaskRunCoordinator {
       await this.finishSynthetic(
         spec,
         runtimeStarted ? 'UNKNOWN' : 'CANNOT_START',
-        runtimeStarted ? 'RUNTIME_EXECUTION_ERROR' : 'RUNTIME_START_FAILED',
+        error instanceof ControlPlaneError
+          ? error.code
+          : runtimeStarted ? 'RUNTIME_EXECUTION_ERROR' : 'RUNTIME_START_FAILED',
         error instanceof Error ? error.message : String(error),
       );
     } finally {

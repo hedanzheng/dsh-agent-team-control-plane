@@ -5,19 +5,40 @@ export class RuntimeAdapterRegistry {
     this.ctx = ctx;
     this.store = store;
     this.live = new Map();
+    this.projectParents = new Map();
   }
 
   listAvailableRuntimes() {
-    return this.store.listRuntimes().map((runtime) => ({
-      providerKey: runtime.providerKey,
-      kind: runtime.kind,
-      availability: runtime.availability,
-      authorized: runtime.authorized,
-      capabilities: runtime.capabilities,
-      adapter: runtime.kind === 'external-worker' ? 'one-shot-subagent' : 'native-harness-pl',
-      taskExecution: runtime.kind === 'external-worker',
-      managementSession: runtime.kind === 'harness-agent',
-    }));
+    return this.store.listRuntimes().map((runtime) => {
+      const providerName = runtime.providerKey.startsWith('subagent:')
+        ? runtime.providerKey.slice('subagent:'.length)
+        : null;
+      const provider = providerName ? this.ctx.subagents.getProvider?.(providerName) : null;
+      const backendMode = provider
+        ? typeof provider.prepareContinuable === 'function' ? 'continuable'
+          : typeof provider.start === 'function' ? 'external'
+            : 'unsupported'
+        : null;
+      const activationAvailable = typeof this.ctx.subagents.startActivation === 'function';
+      const taskExecution = runtime.kind === 'external-worker'
+        && provider !== undefined
+        && provider !== null
+        && backendMode !== 'unsupported'
+        && activationAvailable;
+      return {
+        providerKey: runtime.providerKey,
+        kind: runtime.kind,
+        availability: runtime.availability,
+        authorized: runtime.authorized,
+        capabilities: {
+          ...runtime.capabilities,
+          ...(providerName ? { activationApi: activationAvailable, backendMode } : {}),
+        },
+        adapter: runtime.kind === 'external-worker' ? 'managed-subagent-activation' : 'native-harness-pl',
+        taskExecution,
+        managementSession: runtime.kind === 'harness-agent',
+      };
+    });
   }
 
   describe(providerKey) {
@@ -26,37 +47,98 @@ export class RuntimeAdapterRegistry {
     return descriptor;
   }
 
-  async startRun(spec) {
+  agentRegistry() {
+    return this.ctx.get?.('agents') ?? this.ctx.agents ?? null;
+  }
+
+  isLiveParent(parent) {
+    if (!parent?.id) return false;
+    const registry = this.agentRegistry();
+    return Boolean(registry && registry.get(parent.id) === parent);
+  }
+
+  bindProjectParent(projectId, parent) {
+    if (!projectId || !this.isLiveParent(parent)) {
+      throw new ControlPlaneError(
+        'RUNTIME_PARENT_REQUIRED',
+        'Worker activation requires the exact live PL Agent; reopen the Project PL conversation before starting the Run',
+        409,
+      );
+    }
+    this.projectParents.set(projectId, parent);
+    return parent;
+  }
+
+  resolveProjectParent(projectId, suppliedParent) {
+    if (this.isLiveParent(suppliedParent)) return suppliedParent;
+    const bound = projectId ? this.projectParents.get(projectId) : null;
+    if (this.isLiveParent(bound)) return bound;
+    if (projectId) this.projectParents.delete(projectId);
+    throw new ControlPlaneError(
+      'RUNTIME_PARENT_REQUIRED',
+      'Worker activation requires a live PL Agent; open the Project PL conversation and start the Run from that conversation',
+      409,
+    );
+  }
+
+  assertCanStart(spec) {
     const descriptor = this.describe(spec.providerKey);
     if (descriptor.availability !== 'AVAILABLE' || !descriptor.authorized) {
       throw new ControlPlaneError('RUNTIME_NOT_AUTHORIZED', 'Runtime must be AVAILABLE and Human-authorized', 403);
     }
-    if (!descriptor.taskExecution || !spec.providerKey.startsWith('subagent:')) {
-      throw new ControlPlaneError('RUNTIME_ROLE_UNSUPPORTED', 'Harness Agent runtime is connected as the persistent PL management path, not a one-shot Worker', 409);
+    if (!spec.providerKey.startsWith('subagent:')) {
+      throw new ControlPlaneError('RUNTIME_ROLE_UNSUPPORTED', 'Harness Agent runtime is connected as the persistent PL management path, not a Worker backend', 409);
     }
     const providerName = spec.providerKey.slice('subagent:'.length);
-    const provider = this.ctx.subagents.expectProvider(providerName);
+    const provider = this.ctx.subagents.getProvider?.(providerName);
+    if (!provider) {
+      throw new ControlPlaneError('RUNTIME_NOT_FOUND', `Subagent provider ${providerName} is not currently registered`, 404);
+    }
+    if (typeof this.ctx.subagents.startActivation !== 'function') {
+      throw new ControlPlaneError('RUNTIME_CAPABILITY_MISSING', 'DSH subagent runtime does not expose startActivation()', 409);
+    }
+    if (typeof provider.prepareContinuable !== 'function' && typeof provider.start !== 'function') {
+      throw new ControlPlaneError('RUNTIME_CAPABILITY_MISSING', `Subagent provider ${providerName} has no supported activation method`, 409);
+    }
+    const parent = this.resolveProjectParent(spec.projectId, spec.parentAgent);
+    return { descriptor, providerName, parent };
+  }
+
+  async startRun(spec) {
+    const { descriptor, providerName, parent } = this.assertCanStart(spec);
     const controller = new AbortController();
-    const handle = await provider.start({
-      cwd: spec.cwd,
+    const handle = await this.ctx.subagents.startActivation({
+      provider: providerName,
       label: spec.label,
-      prompt: [{ type: 'text', text: spec.prompt }],
-      parent: {},
+      request: {
+        cwd: spec.cwd,
+        prompt: [{ type: 'text', text: spec.prompt }],
+        parent,
+      },
       signal: controller.signal,
+      delivery: 'caller',
     });
+    const runtimeRunId = handle.childId ?? handle.id;
+    if (!runtimeRunId || !handle.result || typeof handle.dispose !== 'function') {
+      await handle.dispose?.().catch(() => undefined);
+      throw new ControlPlaneError('RUNTIME_CAPABILITY_MISSING', `Subagent provider ${providerName} returned an invalid activation handle`, 409);
+    }
     const record = {
       controlPlaneRunId: spec.runId,
       taskId: spec.taskId,
       agentId: spec.agentId,
-      runtimeRunId: handle.id,
+      projectId: spec.projectId,
+      parentId: parent.id,
+      runtimeRunId,
       handle,
       controller,
+      disposePromise: null,
       state: 'RUNNING',
       startedAt: new Date().toISOString(),
       result: null,
     };
     this.live.set(spec.runId, record);
-    return { runId: spec.runId, taskId: spec.taskId, agentId: spec.agentId, runtimeRunId: handle.id, capabilities: descriptor.capabilities };
+    return { runId: spec.runId, taskId: spec.taskId, agentId: spec.agentId, runtimeRunId, capabilities: descriptor.capabilities };
   }
 
   observeRun(runId) {
@@ -70,7 +152,17 @@ export class RuntimeAdapterRegistry {
     if (!record || record.state !== 'RUNNING') return false;
     record.controller.abort(reason);
     record.state = 'CANCEL_REQUESTED';
+    this.disposeRecord(record);
     return true;
+  }
+
+  disposeRecord(record) {
+    if (!record.disposePromise) {
+      record.disposePromise = Promise.resolve()
+        .then(() => record.handle.dispose())
+        .catch(() => undefined);
+    }
+    return record.disposePromise;
   }
 
   async collectRunResult(runId) {
@@ -87,7 +179,7 @@ export class RuntimeAdapterRegistry {
         diagnostic: typeof record.result.diagnostic === 'string' ? record.result.diagnostic.slice(0, 4000) : null,
       };
     } finally {
-      await record.handle.dispose().catch(() => undefined);
+      await this.disposeRecord(record);
     }
   }
 
@@ -106,8 +198,9 @@ export class RuntimeAdapterRegistry {
   close() {
     for (const [runId, record] of this.live) {
       if (record.state === 'RUNNING') record.controller.abort('Host shutdown');
-      record.handle.dispose().catch(() => undefined);
+      this.disposeRecord(record);
       this.live.delete(runId);
     }
+    this.projectParents.clear();
   }
 }

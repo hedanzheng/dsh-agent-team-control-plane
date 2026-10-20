@@ -60,7 +60,7 @@ export async function apply(ctx) {
   const adapters = new RuntimeAdapterRegistry(ctx, store);
   const governance = new CollaborationGovernance({ store, controlPlane, adapters, logger: ctx.logger });
   const coordinator = new TaskRunCoordinator({ store, controlPlane, adapters, governance, logger: ctx.logger });
-  const disposePLBridge = installPLBridge(ctx, { controlPlane, coordinator, governance, store });
+  const disposePLBridge = installPLBridge(ctx, { controlPlane, coordinator, governance, store, adapters });
 
   try {
     const initial = await scanner.scan(process.cwd());

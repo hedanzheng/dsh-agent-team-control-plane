@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5 - 2026-10-20
+
+- Replaced the invalid direct `provider.start()` Worker call with DSH's managed `subagents.startActivation()` entry point.
+- Bound each Project to the exact live PL Agent supplied by the model-tool execution context, satisfying local `fork`/`spawn` authorization and parent-context requirements.
+- Added preflight diagnostics for missing live parents and unsupported provider capabilities instead of collapsing them into a generic start failure.
+- Updated cancellation and result collection to use managed activation disposal and added regression coverage for continuable-only providers.
+
 ## 0.5.4 - 2026-10-20
 
 - Added six Host-backed PL tools for authoritative Project state, interview capture, Task creation/assignment, Worker Run launch, and PL review.

@@ -29,6 +29,7 @@ function scanner() {
 class FakeAdapters {
   constructor(factory) { this.factory = factory; this.live = new Map(); }
   describe(providerKey) { return { providerKey, adapter: 'one-shot-subagent', taskExecution: true, capabilities: { oneShot: true, sessionResume: false } }; }
+  assertCanStart() { return true; }
   async startRun(spec) {
     const record = { state: 'RUNNING', cancelled: false, spec };
     this.live.set(spec.runId, record);

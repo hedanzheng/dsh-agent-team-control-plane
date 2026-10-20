@@ -39,6 +39,7 @@ function scanner() {
 class SequenceAdapters {
   constructor(outputs) { this.outputs = [...outputs]; this.live = new Map(); this.prompts = []; }
   describe(providerKey) { return { providerKey, adapter: 'mock-one-shot-provider', taskExecution: true, capabilities: { oneShot: true, sessionResume: false } }; }
+  assertCanStart() { return true; }
   async startRun(spec) { this.prompts.push(spec.prompt); this.live.set(spec.runId, spec); return { runtimeRunId: `mock-${spec.runId}`, capabilities: { oneShot: true } }; }
   observeRun(runId) { return { state: this.live.has(runId) ? 'RUNNING' : 'NOT_LIVE' }; }
   cancelRun() { return false; }

@@ -33,6 +33,7 @@ function snapshot(extra = {}) {
 function fixture() {
   const calls = [];
   const state = snapshot();
+  const parentAgent = { id: 'SESSION-PL-1' };
   const controlPlane = {
     requireProject(id) { assert.equal(id, project.id); return project; },
     requireTask(_project, id) { return { id, version: 2, resultId: 'RESULT-1' }; },
@@ -52,10 +53,13 @@ function fixture() {
     listAgents() { return [{ id: 'AGENT-WORKER-1', role: 'WORKER', status: 'IDLE', currentTaskId: null }]; },
     getResult() { return { id: 'RESULT-1', evidenceRefs: ['EVIDENCE-1'] }; },
   };
+  const adapters = {
+    bindProjectParent(projectId, parent) { calls.push(['bindProjectParent', { projectId, parent }]); },
+  };
   const tools = createPLBridgeTools({
-    controlPlane, coordinator, governance, store,
+    controlPlane, coordinator, governance, store, adapters,
   });
-  return { calls, tools };
+  return { calls, tools, parentAgent };
 }
 
 function named(tools, name) {
@@ -94,7 +98,7 @@ test('record interview binds explicit answers to the Human owner and current ver
 });
 
 test('formal Task operations always use the assigned PL identity', async () => {
-  const { calls, tools } = fixture();
+  const { calls, tools, parentAgent } = fixture();
   await named(tools, 'agent_team_create_task').execute({
     project_id: project.id,
     title: 'T1', goal: 'Design', scope_allowed: ['docs/interface.md'],
@@ -105,12 +109,14 @@ test('formal Task operations always use the assigned PL identity', async () => {
     project_id: project.id,
     task_id: 'TASK-1',
     verification_commands: ['npm test'],
-  }, { signal: new AbortController().signal });
+  }, { signal: new AbortController().signal, agent: parentAgent });
   for (const name of ['createTask', 'assignTask', 'startTaskRun']) {
     const input = calls.find(([called]) => called === name)[1];
     assert.deepEqual(input.actor, { type: 'pl', id: 'AGENT-PL-1' });
   }
   assert.deepEqual(calls.find(([name]) => name === 'startTaskRun')[1].verificationCommands, [{ command: 'npm test' }]);
+  assert.equal(calls.find(([name]) => name === 'startTaskRun')[1].parentAgent, parentAgent);
+  assert.deepEqual(calls.find(([name]) => name === 'bindProjectParent')[1], { projectId: project.id, parent: parentAgent });
 });
 
 test('PL review consumes authoritative Result evidence', async () => {
@@ -148,6 +154,7 @@ test('installation registers policy and disposes every registration', () => {
     coordinator: { startTaskRun: () => snapshot() },
     governance: { submitReview: () => snapshot() },
     store: { listAgents: () => [], getResult: () => ({ evidenceRefs: ['EVIDENCE-1'] }) },
+    adapters: { bindProjectParent() {} },
   });
   assert.equal(registered.length, 7);
   dispose();
