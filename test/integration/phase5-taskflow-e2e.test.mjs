@@ -212,6 +212,9 @@ test('Phase 5 client exposes all six Host-backed views without credential or cha
   assert.match(source, /ctx\.uiWorkspace\.openWorkspace\(/);
   assert.match(source, /requestDraftInitialization\(/);
   assert.match(source, /\.input\.for\(binding\.ctx\)\.submit\(\)/);
+  assert.match(source, /defaultWorkspaceDir: currentWorkspace\(\)\?\.path/);
+  assert.match(source, /value\.match\(\/\[A-Za-z\]/);
+  assert.doesNotMatch(source, /workspaceDir: 'D:\\\\GPT-workspace\\\\agent-control-plane-mvp'/);
   assert.doesNotMatch(source, /startSession\(undefined/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|process\.env|api[_-]?key|credential/i);
 });

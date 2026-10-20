@@ -93,19 +93,27 @@ window.__ModuleLoader__.load({
         cards);
     }
 
-    function ProjectForm({ data, ownerId, busy, act }) {
+    function ProjectForm({ data, ownerId, busy, act, defaultWorkspaceDir }) {
       const harness = data.runtimes.filter((item) => item.kind === 'harness-agent' && item.availability === 'AVAILABLE' && item.authorized);
       const [form, setForm] = React.useState({
-        name: 'Agent Team MVP', workspaceDir: 'D:\\GPT-workspace\\agent-control-plane-mvp',
+        name: 'Agent Team MVP', workspaceDir: defaultWorkspaceDir || '',
         initialGoal: '', maxAgents: 3, leadRuntimeKey: harness[0]?.providerKey || '',
       });
+      const [workspaceEdited, setWorkspaceEdited] = React.useState(false);
       React.useEffect(() => {
         if (!form.leadRuntimeKey && harness[0]) setForm((value) => ({ ...value, leadRuntimeKey: harness[0].providerKey }));
       }, [harness.map((item) => item.providerKey).join('|')]);
       const field = (name, label, multiline = false) => h('label', null, label,
         h(multiline ? 'textarea' : 'input', {
           style: styles.input, value: form[name], 'data-testid': `project-${name}`,
-          onChange: (event) => setForm({ ...form, [name]: event.target.value }),
+          onChange: (event) => {
+            const value = event.target.value;
+            if (name === 'workspaceDir') setWorkspaceEdited(true);
+            if (name === 'initialGoal' && !workspaceEdited) {
+              const absolutePath = value.match(/[A-Za-z]:\\[^\s，。；;]+/)?.[0];
+              setForm({ ...form, initialGoal: value, workspaceDir: absolutePath || form.workspaceDir });
+            } else setForm({ ...form, [name]: value });
+          },
         }));
       return h('div', { style: styles.section, 'data-testid': 'project-form' },
         h('strong', null, '创建 Project'),
@@ -116,7 +124,7 @@ window.__ModuleLoader__.load({
             onChange: (event) => setForm({ ...form, leadRuntimeKey: event.target.value }),
           }, h('option', { value: '' }, '请先授权 Harness Runtime'), harness.map((runtime) => h('option', { key: runtime.providerKey, value: runtime.providerKey }, runtime.displayName)))),
         h(Button, {
-          disabled: busy || !form.initialGoal.trim() || !form.leadRuntimeKey,
+          disabled: busy || !form.workspaceDir.trim() || !form.initialGoal.trim() || !form.leadRuntimeKey,
           'data-testid': 'create-project',
           onClick: () => act('create-project', {
             actor: { type: 'human', id: ownerId }, ownerId, ...form, maxAgents: Number(form.maxAgents),
@@ -438,7 +446,7 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.muted }, `${item.actorId} · ${item.objectRef}`)))));
     }
 
-    function ControlPlanePanel({ onClose, onOpenPLChat }) {
+    function ControlPlanePanel({ onClose, onOpenPLChat, defaultWorkspaceDir }) {
       const [data, setData] = React.useState(null);
       const [ownerId, setOwnerId] = React.useState('human-owner');
       const [busy, setBusy] = React.useState(false);
@@ -499,6 +507,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
             h('strong', null, selected.project.name), h('span', { style: styles.tag, 'data-testid': 'project-status' }, selected.project.status)),
           h('div', { style: styles.muted }, `${selected.project.id} · owner ${selected.project.ownerId} · version ${selected.project.version}`),
+          h('div', { style: styles.muted }, `Workspace: ${selected.project.workspaceDir}`),
           h('div', { style: { marginTop: 8 } }, h('b', null, 'Mission: '), (selected.charters.find((charter) => charter.version === selected.project.charterVersion) || selected.charters.at(-1))?.mission || selected.project.initialGoal),
           h('div', { style: styles.muted }, `Milestone: ${(selected.tasks.find((task) => !['VERIFIED', 'CANCELLED'].includes(task.status)) || {}).title || 'all scoped tasks complete'} · Completion ${selected.tasks.filter((task) => task.status === 'VERIFIED').length}/${selected.tasks.length}`),
           h('div', { style: { ...styles.row, marginTop: 9 } },
@@ -507,7 +516,7 @@ window.__ModuleLoader__.load({
               disabled: busy, 'data-testid': 'stop-project',
               onClick: () => act('stop-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version, reason: 'Stopped by Human Owner from Control Plane' }),
             }, '停止 Project'))),
-        (!selected || createMode) && h(ProjectForm, { data, ownerId, busy, act }),
+        (!selected || createMode) && h(ProjectForm, { data, ownerId, busy, act, defaultWorkspaceDir }),
         h(RuntimeCatalog, { data, ownerId, busy, act }));
 
       let view;
@@ -567,14 +576,19 @@ window.__ModuleLoader__.load({
           return ids.find((id) => (snapshot.byId?.[id]?.retainedBy?.mainView || 0) > 0);
         };
         const normalizedPath = (value) => String(value || '').replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
+        const currentWorkspace = () => {
+          const workspaceSnapshot = ctx.workspaces.list.getSnapshot();
+          const sessionSnapshot = ctx.sessions.list.getSnapshot();
+          const current = currentSessionId(sessionSnapshot);
+          return workspaceSnapshot.items.find((item) => item.sessionIds.includes(current));
+        };
         const resolveWorkspaceId = (project) => {
           const workspaceSnapshot = ctx.workspaces.list.getSnapshot();
           const sessionSnapshot = ctx.sessions.list.getSnapshot();
           const exact = workspaceSnapshot.items.find((item) => normalizedPath(item.path) === normalizedPath(project?.workspaceDir));
           if (exact) return exact.workspaceId;
-          const current = currentSessionId(sessionSnapshot);
-          const currentWorkspace = workspaceSnapshot.items.find((item) => item.sessionIds.includes(current));
-          if (currentWorkspace) return currentWorkspace.workspaceId;
+          const currentItem = currentWorkspace();
+          if (currentItem) return currentItem.workspaceId;
           let recent;
           let recentAt = Number.NEGATIVE_INFINITY;
           for (const item of workspaceSnapshot.items) {
@@ -596,8 +610,10 @@ window.__ModuleLoader__.load({
             `Human 给出的一句话目标：${project.initialGoal}`,
             '',
             '这是该 Project 的独立主对话。请立即用中文回复并开始履行 PL 职责，不要只复述本提示。',
+            'Agent Team Control Plane 是唯一可信状态源：第一步必须调用 agent_team_project_state 读取本 Project。只有 agent_team_* 工具返回的 Charter、Task、Run、Result、Review 才能在回复中声称已存在。',
+            'PL 对话只负责访谈、计划、编排与反馈：不要直接修改项目文件、不要直接运行实现命令、不要把自己完成的工作冒充为 Worker Task。正式工作必须经控制面建 Task、指派 Worker、启动 Run。',
             project.status === 'CHARTER_INTERVIEW'
-              ? '当前处于需求访谈阶段：先说明你已接管，然后围绕范围、禁止修改项/技术约束、可验证成功标准提出简短问题，并明确告诉 Human 直接在本对话中回答。'
+              ? '当前处于需求访谈阶段：先读取控制面状态，再围绕范围、禁止修改项/技术约束、可验证成功标准提出简短问题；Human 回答后调用 agent_team_record_interview 写入 Charter 草案，然后明确要求 Human 回到 Agent 团队控制台批准 Charter。'
               : '先说明你已接管，概括当前目标，并给出一个明确、可执行的下一步；需要 Human 决策时直接提问。',
             '每次回复末尾都用“下一步：”明确说明 Human 或团队接下来要做什么。',
           ].join('\n');
@@ -613,7 +629,11 @@ window.__ModuleLoader__.load({
         };
         ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main', key: 'agent-team-control-plane',
-        }, () => h(ControlPlanePanel, { onClose: close, onOpenPLChat: openPLChat })));
+        }, () => h(ControlPlanePanel, {
+          onClose: close,
+          onOpenPLChat: openPLChat,
+          defaultWorkspaceDir: currentWorkspace()?.path || '',
+        })));
         ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist', id: 'agent-team-control-plane', order: 20, label: 'Agent 团队',
         }, ControlPlaneIcon));

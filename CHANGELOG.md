@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4 - 2026-10-20
+
+- Added six Host-backed PL tools for authoritative Project state, interview capture, Task creation/assignment, Worker Run launch, and PL review.
+- Added a persistent PL policy that forbids direct implementation from the PL conversation and prevents narrative-only state claims.
+- Kept Charter/team approval Human-only; the PL bridge can record confirmed interview answers but cannot approve or stop a Project.
+- Updated PL conversation bootstrap instructions to require a state read before planning and Control Plane operations for all formal work.
+
 ## 0.5.3 - 2026-10-20
 
 - Fixed PL conversation launch being superseded by an immediate second navigation.

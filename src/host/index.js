@@ -6,9 +6,10 @@ import { RuntimeAdapterRegistry } from './runtime-adapter.js';
 import { TaskRunCoordinator } from './run-coordinator.js';
 import { CollaborationGovernance } from './governance.js';
 import { ControlPlaneError } from '../shared/contracts.js';
+import { installPLBridge } from './pl-bridge.js';
 
 export const name = 'agent-team-control-plane';
-export const inject = ['webServer', 'llm', 'subagents', 'skills'];
+export const inject = ['webServer', 'llm', 'subagents', 'skills', 'tools', 'systemPrompt'];
 
 const ROUTE = '/agent-team-control-plane/v1';
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -59,6 +60,7 @@ export async function apply(ctx) {
   const adapters = new RuntimeAdapterRegistry(ctx, store);
   const governance = new CollaborationGovernance({ store, controlPlane, adapters, logger: ctx.logger });
   const coordinator = new TaskRunCoordinator({ store, controlPlane, adapters, governance, logger: ctx.logger });
+  const disposePLBridge = installPLBridge(ctx, { controlPlane, coordinator, governance, store });
 
   try {
     const initial = await scanner.scan(process.cwd());
@@ -84,6 +86,7 @@ export async function apply(ctx) {
 
   ctx.effect(() => async () => {
     clearInterval(requestTimer);
+    disposePLBridge();
     await governance.close();
     await coordinator.close();
     store.close();
