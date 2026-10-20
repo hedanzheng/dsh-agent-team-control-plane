@@ -1,0 +1,14 @@
+node_modules/
+*.log
+*.tgz
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.credentials.yaml
+.env
+.env.*
+coverage/
+dist/
+.DS_Store
+Thumbs.db
+

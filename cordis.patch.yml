@@ -1,0 +1,3 @@
+- insert:
+    - id: agent-team-control-plane
+      name: '@local/agent-team-control-plane'
