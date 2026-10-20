@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_ROLE_PERMISSIONS, json, parseJson } from '../shared/contracts.js';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 function mapProject(row) {
   if (!row) return undefined;
@@ -270,6 +270,16 @@ function mapRequestRun(row) {
     runtimeSessionRef: row.runtime_session_ref, status: row.status, terminalKind: row.terminal_kind,
     error: row.error_code ? { code: row.error_code, message: row.error_message } : null,
     startedAt: row.started_at, endedAt: row.ended_at, createdAt: row.created_at,
+  };
+}
+
+function mapReviewRun(row) {
+  if (!row) return undefined;
+  return {
+    id: row.id, taskId: row.task_id, resultId: row.result_id, reviewerAgentId: row.reviewer_agent_id,
+    providerKey: row.provider_key, runtimeSessionRef: row.runtime_session_ref, status: row.status,
+    decision: row.decision, error: row.error_code ? { code: row.error_code, message: row.error_message } : null,
+    rawOutputExcerpt: row.raw_output_excerpt, startedAt: row.started_at, endedAt: row.ended_at, createdAt: row.created_at,
   };
 }
 
@@ -570,6 +580,25 @@ export class ControlPlaneStore {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS reviews_task ON reviews(task_id, created_at);
+      CREATE TABLE IF NOT EXISTS review_runs (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        result_id TEXT NOT NULL REFERENCES results(id) ON DELETE CASCADE,
+        reviewer_agent_id TEXT NOT NULL REFERENCES agents(id),
+        provider_key TEXT NOT NULL REFERENCES runtime_sources(provider_key),
+        runtime_session_ref TEXT,
+        status TEXT NOT NULL CHECK(status IN ('STARTING','RUNNING','SUCCEEDED','FAILED','CANCELLED','TIMED_OUT','UNKNOWN','CANNOT_START')),
+        decision TEXT CHECK(decision IN ('APPROVE','REJECT')),
+        error_code TEXT,
+        error_message TEXT,
+        raw_output_excerpt TEXT,
+        started_at TEXT,
+        ended_at TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS one_active_review_run_per_result
+        ON review_runs(task_id, result_id) WHERE status IN ('STARTING','RUNNING');
+      CREATE INDEX IF NOT EXISTS review_runs_task ON review_runs(task_id, created_at);
       CREATE TABLE IF NOT EXISTS findings (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -858,6 +887,11 @@ export class ControlPlaneStore {
       WHERE t.project_id=? ORDER BY v.created_at, v.id`).all(projectId).map(mapReview);
   }
 
+  listReviewRuns(projectId) {
+    return this.db.prepare(`SELECT x.* FROM review_runs x JOIN tasks t ON t.id=x.task_id
+      WHERE t.project_id=? ORDER BY x.created_at, x.id`).all(projectId).map(mapReviewRun);
+  }
+
   listFindings(projectId) {
     return this.db.prepare('SELECT * FROM findings WHERE project_id=? ORDER BY created_at, id').all(projectId).map(mapFinding);
   }
@@ -885,6 +919,7 @@ export class ControlPlaneStore {
         runtimeScan: this.getSystemState('runtime_scan', null),
         runtimeAdapters: this.getSystemState('runtime_adapters', []),
         taskRunRecovery: this.getSystemState('task_run_recovery', { recoveredRuns: 0 }),
+        reviewRunRecovery: this.getSystemState('review_run_recovery', { recoveredReviewRuns: 0 }),
       },
       selected: selected ? {
         project: selected,
@@ -905,6 +940,7 @@ export class ControlPlaneStore {
         responses: this.listResponses(selected.id),
         requestRuns: this.listRequestRuns(selected.id),
         reviews: this.listReviews(selected.id),
+        reviewRuns: this.listReviewRuns(selected.id),
         findings: this.listFindings(selected.id),
         planChecks: this.listPlanChecks(selected.id),
         decisions: this.listDecisions(selected.id),

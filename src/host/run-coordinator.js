@@ -72,6 +72,8 @@ export class TaskRunCoordinator {
     const runtime = this.controlPlane.requireUsableAuthorizedRuntime(agent.providerKey);
     const descriptor = this.adapters.describe(runtime.providerKey);
     if (!descriptor.taskExecution) throw new ControlPlaneError('RUNTIME_ROLE_UNSUPPORTED', 'assigned runtime cannot execute one-shot Worker Tasks', 409);
+    const writeIntent = input.writeIntent !== false;
+    this.adapters.prepareWorkspace(project.workspaceDir, { create: writeIntent });
     this.adapters.assertCanStart({
       providerKey: runtime.providerKey,
       projectId: project.id,
@@ -80,7 +82,6 @@ export class TaskRunCoordinator {
     const operationId = this.controlPlane.assertNewOperation(input.operationId);
     const verificationCommands = normalizeCommands(input.verificationCommands);
     const timeoutMs = requireInteger(input.timeoutMs ?? 600000, 'timeoutMs', { min: 5000, max: 1800000 });
-    const writeIntent = input.writeIntent !== false;
     const attempts = this.store.db.prepare('SELECT COALESCE(MAX(attempt), 0) AS value FROM task_runs WHERE task_id=?').get(task.id).value;
     const runId = id('RUN');
     const createdAt = now();
@@ -207,6 +208,18 @@ export class TaskRunCoordinator {
       const filesPass = artifactEvidence.every((item) => item.status === 'VERIFIED');
       if (!commandsPass || !filesPass) outcome = 'PARTIAL';
     }
+    const verificationUnresolved = [];
+    if (parsed.terminalKind === 'SUCCESS' && verificationRuns.length === 0) {
+      verificationUnresolved.push('Host verification incomplete: no verification command was configured');
+    }
+    for (const item of artifactEvidence.filter((entry) => entry.status !== 'VERIFIED')) {
+      verificationUnresolved.push(`Host artifact verification failed for ${item.ref}: ${item.details?.error ?? item.status}`);
+    }
+    for (const item of verificationRuns.filter((entry) => entry.status !== 'PASSED')) {
+      const diagnostic = item.stderrExcerpt || item.stdoutExcerpt || item.status;
+      verificationUnresolved.push(`Host command verification ${item.status.toLowerCase()} (exit ${item.exitCode ?? 'unknown'}): ${item.command}: ${diagnostic}`.slice(0, 4000));
+    }
+    const unresolved = [...new Set([...(parsed.unresolved ?? []), ...verificationUnresolved])];
     const commandEvidence = verificationRuns.map((item) => ({
       kind: 'COMMAND', ref: item.command, status: item.status === 'PASSED' ? 'VERIFIED' : 'FAILED',
       details: { exitCode: item.exitCode, stdoutExcerpt: item.stdoutExcerpt, stderrExcerpt: item.stderrExcerpt },
@@ -235,7 +248,7 @@ export class TaskRunCoordinator {
         request_proposal_json, raw_output_excerpt, created_at
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         resultId, spec.task.id, spec.runId, outcome, parsed.changeSummary, json(parsed.artifacts), json(verifiedActions),
-        parsed.testPlan, json(parsed.risks), json(parsed.unresolved), json(parsed.findings),
+        parsed.testPlan, json(parsed.risks), json(unresolved), json(parsed.findings),
         json([...parsed.evidenceRefs, ...allEvidence.map((item) => item.id)]), json(parsed.checkpoint),
         json(parsed.requestProposal), parsed.rawOutputExcerpt, at,
       );
@@ -278,7 +291,7 @@ export class TaskRunCoordinator {
       this.controlPlane.activity({
         operationId: `${spec.runId}:terminal`, projectId: spec.project.id, eventType: 'TASK_RUN_TERMINAL',
         actor: { type: 'agent', id: spec.agent.id }, objectRef: spec.runId,
-        summary: `Run ${runStatus}; Result ${outcome}; Task ${taskStatus}`, at,
+        summary: `Run ${runStatus}; Result ${outcome}; Task ${taskStatus}${verificationUnresolved.length ? `; ${verificationUnresolved.join(' | ').slice(0, 1200)}` : ''}`, at,
       });
     });
     return { resultId, outcome, taskStatus, runStatus };

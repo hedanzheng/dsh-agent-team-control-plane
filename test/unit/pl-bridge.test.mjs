@@ -22,6 +22,7 @@ function snapshot(extra = {}) {
       results: [],
       evidence: [],
       reviews: [],
+      reviewRuns: [],
       findings: [],
       planChecks: [],
       activities: [],
@@ -48,6 +49,7 @@ function fixture() {
   };
   const governance = {
     submitReview(input) { calls.push(['submitReview', input]); return state; },
+    requestIndependentReview(input) { calls.push(['requestIndependentReview', input]); return state; },
   };
   const store = {
     listAgents() { return [{ id: 'AGENT-WORKER-1', role: 'WORKER', status: 'IDLE', currentTaskId: null }]; },
@@ -76,6 +78,7 @@ test('PL bridge exposes state and workflow tools without Human approval actions'
     'agent_team_create_task',
     'agent_team_assign_task',
     'agent_team_start_task_run',
+    'agent_team_request_review',
     'agent_team_review_task',
   ]);
   assert.equal(tools.some((item) => /approve|stop_project/.test(item.name)), false);
@@ -131,6 +134,18 @@ test('PL review consumes authoritative Result evidence', async () => {
   assert.deepEqual(input.actor, { type: 'pl', id: 'AGENT-PL-1' });
 });
 
+test('PL can launch a real independent Reviewer Run with the live parent Agent', async () => {
+  const { calls, tools, parentAgent } = fixture();
+  await named(tools, 'agent_team_request_review').execute({
+    project_id: project.id,
+    task_id: 'TASK-1',
+  }, { agent: parentAgent });
+  const input = calls.find(([name]) => name === 'requestIndependentReview')[1];
+  assert.deepEqual(input.actor, { type: 'pl', id: 'AGENT-PL-1' });
+  assert.equal(input.parentAgent, parentAgent);
+  assert.match(input.operationId, /^pl-tool:request-review:/);
+});
+
 test('installation registers policy and disposes every registration', () => {
   const registered = [];
   const disposed = [];
@@ -152,12 +167,12 @@ test('installation registers policy and disposes every registration', () => {
       assignTask: () => snapshot(),
     },
     coordinator: { startTaskRun: () => snapshot() },
-    governance: { submitReview: () => snapshot() },
+    governance: { submitReview: () => snapshot(), requestIndependentReview: () => snapshot() },
     store: { listAgents: () => [], getResult: () => ({ evidenceRefs: ['EVIDENCE-1'] }) },
     adapters: { bindProjectParent() {} },
   });
-  assert.equal(registered.length, 7);
+  assert.equal(registered.length, 8);
   dispose();
-  assert.equal(disposed.length, 7);
+  assert.equal(disposed.length, 8);
   assert.equal(disposed.at(-1), 'agent_team_project_state');
 });

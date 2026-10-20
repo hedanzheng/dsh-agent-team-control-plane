@@ -208,7 +208,7 @@ window.__ModuleLoader__.load({
       const activeAgents = selected.agents.filter((agent) => agent.status !== 'REPLACED');
       const replacedAgents = selected.agents.filter((agent) => agent.status === 'REPLACED');
       return h('div', { style: styles.section, 'data-testid': 'active-team' },
-        h('strong', null, `Active Agent Records · ${activeAgents.length}/${selected.project.maxAgents}`),
+        h('strong', null, `当前有效 Agent · ${activeAgents.length}/${selected.project.maxAgents}（已替换身份仅计入历史）`),
         activeAgents.map((agent) => h('div', { key: agent.id, style: styles.card, 'data-testid': 'agent-record' },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
             h('b', null, agent.displayName), h('span', { style: styles.tag }, agent.status)),
@@ -243,7 +243,7 @@ window.__ModuleLoader__.load({
       const runs = selected.taskRuns || [];
       const results = selected.results || [];
       const evidence = selected.evidence || [];
-      const worker = selected.agents.find((agent) => agent.role === 'WORKER');
+      const worker = selected.agents.find((agent) => agent.role === 'WORKER' && !['REPLACED', 'UNAVAILABLE'].includes(agent.status));
       const [verificationCommand, setVerificationCommand] = React.useState('');
       const [form, setForm] = React.useState({
         title: '', goal: '', allowed: '', forbidden: '', acceptance: '', dependencies: '',
@@ -336,6 +336,7 @@ window.__ModuleLoader__.load({
               result && h('div', { style: { marginTop: 5 } },
                 h('b', null, `${result.outcome}: `), result.changeSummary,
                 h('div', { style: styles.muted }, `Verified actions: ${result.verifiedActions.join('；') || 'none'}`),
+                result.unresolved?.length > 0 && h('div', { style: { ...styles.error, marginTop: 5 } }, `Unresolved: ${result.unresolved.join('；')}`),
                 runEvidence.map((item) => h('div', { key: item.id, style: styles.muted }, `${item.kind} ${item.status} · ${item.ref}`))),
               active && h(Button, {
                 disabled: busy, 'data-testid': `cancel-run-${run.id}`,
@@ -352,10 +353,11 @@ window.__ModuleLoader__.load({
             h('div', null, proposal.payload.goal)))));
     }
 
-    function GovernancePanel({ selected, busy, act }) {
+    function GovernancePanel({ selected, ownerId, busy, act }) {
       const requests = selected.requests || [];
       const responses = selected.responses || [];
       const reviews = selected.reviews || [];
+      const reviewRuns = selected.reviewRuns || [];
       const findings = selected.findings || [];
       const planChecks = selected.planChecks || [];
       const decisions = selected.decisions || [];
@@ -365,7 +367,7 @@ window.__ModuleLoader__.load({
       const [planNotes, setPlanNotes] = React.useState('Current evidence and dependencies remain aligned with the approved Charter.');
       const [decisionForm, setDecisionForm] = React.useState({ title: '', body: '' });
       const lead = selected.project.leadAgentId;
-      const reviewer = selected.agents.find((agent) => agent.role === 'REVIEWER');
+      const reviewer = selected.agents.find((agent) => agent.role === 'REVIEWER' && !['REPLACED', 'UNAVAILABLE'].includes(agent.status));
       const evidenceFor = (task) => (selected.results.find((item) => item.id === task.resultId)?.evidenceRefs || []).slice(0, 4);
       const review = (task, actor, decision) => act('submit-review', {
         actor, taskId: task.id, decision,
@@ -401,11 +403,17 @@ window.__ModuleLoader__.load({
           h('input', { style: styles.input, value: reviewIssue, placeholder: 'Reject 时填写明确问题', 'data-testid': 'review-issue', onChange: (event) => setReviewIssue(event.target.value) }),
           submitted.map((task) => {
             const reviewerApproved = reviews.some((item) => item.taskId === task.id && item.resultId === task.resultId && item.reviewerRole === 'REVIEWER' && item.decision === 'APPROVE');
+            const reviewRun = [...reviewRuns].reverse().find((item) => item.taskId === task.id && item.resultId === task.resultId);
             return h('div', { key: task.id, style: styles.card, 'data-testid': 'review-record' },
               h('div', { style: { ...styles.row, justifyContent: 'space-between' } }, h('b', null, task.title), h('span', { style: styles.tag }, task.reviewPolicy)),
               task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && reviewer && h('div', { style: styles.row },
-                h(Button, { disabled: busy, onClick: () => review(task, { type: 'agent', id: reviewer.id }, 'APPROVE') }, 'Reviewer 通过'),
-                h(Button, { disabled: busy, onClick: () => review(task, { type: 'agent', id: reviewer.id }, 'REJECT') }, 'Reviewer 退回')),
+                h(Button, {
+                  disabled: busy || ['STARTING', 'RUNNING'].includes(reviewRun?.status),
+                  'data-testid': `request-review-${task.id}`,
+                  onClick: () => act('request-review', { actor: { type: 'human', id: ownerId }, taskId: task.id }),
+                }, ['STARTING', 'RUNNING'].includes(reviewRun?.status) ? '独立 Reviewer 运行中' : '请求独立 Reviewer 运行')),
+              task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && !reviewer && h('div', { style: styles.error }, '当前没有可用 Reviewer；请先在 Agents 中更换 Reviewer。'),
+              reviewRun && h('div', { style: styles.muted }, `Review Run ${reviewRun.id} · ${reviewRun.status}${reviewRun.error ? ` · ${reviewRun.error.code}: ${reviewRun.error.message}` : ''}`),
               (task.reviewPolicy !== 'REVIEWER_PL' || reviewerApproved) && h('div', { style: styles.row },
                 h(Button, { disabled: busy, 'data-testid': `approve-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'APPROVE') }, 'PL 通过'),
                 h(Button, { disabled: busy, 'data-testid': `reject-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'REJECT') }, 'PL 退回')));
@@ -512,6 +520,10 @@ window.__ModuleLoader__.load({
           h('div', { style: styles.muted }, `Milestone: ${(selected.tasks.find((task) => !['VERIFIED', 'CANCELLED'].includes(task.status)) || {}).title || 'all scoped tasks complete'} · Completion ${selected.tasks.filter((task) => task.status === 'VERIFIED').length}/${selected.tasks.length}`),
           h('div', { style: { ...styles.row, marginTop: 9 } },
             h(Button, { disabled: busy, 'data-testid': 'open-project-pl-chat', onClick: () => launchPLChat(selected) }, '新建并启动 PL 对话'),
+            selected.project.status === 'ACTIVE' && selected.tasks.length > 0 && selected.tasks.every((task) => task.status === 'VERIFIED') && h(Button, {
+              disabled: busy, 'data-testid': 'complete-project',
+              onClick: () => act('complete-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version }),
+            }, '验收并完成 Project'),
             selected.project.status === 'ACTIVE' && h(Button, {
               disabled: busy, 'data-testid': 'stop-project',
               onClick: () => act('stop-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version, reason: 'Stopped by Human Owner from Control Plane' }),
@@ -536,7 +548,7 @@ window.__ModuleLoader__.load({
         selected && !createMode && selected.project.status === 'CHARTER_INTERVIEW' && h(Interview, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'CHARTER_PENDING_APPROVAL' && h(CharterApproval, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'TEAM_PENDING_APPROVAL' && h(TeamApproval, { selected, ownerId, busy, act }),
-        selected && !createMode && ['ACTIVE', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, { selected, busy, act }),
+        selected && !createMode && ['ACTIVE', 'COMPLETED', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, { selected, ownerId, busy, act }),
         (!selected || createMode) && h('div', { style: styles.card }, '创建并选择 Project 后显示审批队列。'));
       else view = h(ActivityView, { selected });
 

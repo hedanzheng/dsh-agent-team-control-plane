@@ -1,4 +1,6 @@
 import { ControlPlaneError } from '../shared/contracts.js';
+import { mkdirSync, statSync } from 'node:fs';
+import { isAbsolute, resolve } from 'node:path';
 
 export class RuntimeAdapterRegistry {
   constructor(ctx, store) {
@@ -45,6 +47,26 @@ export class RuntimeAdapterRegistry {
     const descriptor = this.listAvailableRuntimes().find((item) => item.providerKey === providerKey);
     if (!descriptor) throw new ControlPlaneError('RUNTIME_NOT_FOUND', `Runtime ${providerKey} is not registered`, 404);
     return descriptor;
+  }
+
+  prepareWorkspace(cwd, { create = false } = {}) {
+    if (typeof cwd !== 'string' || !cwd.trim() || !isAbsolute(cwd.trim())) {
+      throw new ControlPlaneError('RUNTIME_CWD_INVALID', 'Task workspace must be a non-empty absolute path', 409);
+    }
+    const workspace = resolve(cwd.trim());
+    try {
+      if (create) mkdirSync(workspace, { recursive: true });
+      const info = statSync(workspace);
+      if (!info.isDirectory()) throw new ControlPlaneError('RUNTIME_CWD_INVALID', `Task workspace is not a directory: ${workspace}`, 409);
+      return workspace;
+    } catch (error) {
+      if (error instanceof ControlPlaneError) throw error;
+      if (error?.code === 'ENOENT') {
+        throw new ControlPlaneError('RUNTIME_CWD_MISSING', `Task workspace does not exist: ${workspace}`, 409, { workspace });
+      }
+      const code = create ? 'RUNTIME_CWD_CREATE_FAILED' : 'RUNTIME_CWD_INVALID';
+      throw new ControlPlaneError(code, `Task workspace is unavailable: ${workspace}: ${error instanceof Error ? error.message : String(error)}`, 409, { workspace });
+    }
   }
 
   agentRegistry() {

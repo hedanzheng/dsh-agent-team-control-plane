@@ -23,6 +23,7 @@ const needsInput = (toAgentId, body = 'Confirm the interface contract') => outpu
   requestProposal: { toAgentId, body, blocking: true, evidenceRefs: [] },
 });
 const responseOutput = (body) => [{ type: 'text', text: `AGENT_TEAM_RESPONSE_START\n${JSON.stringify({ outcome: 'ANSWER', body, evidenceRefs: [] })}\nAGENT_TEAM_RESPONSE_END` }];
+const reviewOutput = (evidenceRef, decision = 'APPROVE') => [{ type: 'text', text: `AGENT_TEAM_REVIEW_START\n${JSON.stringify({ decision, issues: decision === 'REJECT' ? ['Concrete review issue'] : [], evidenceRefs: [evidenceRef] })}\nAGENT_TEAM_REVIEW_END` }];
 
 function scanner() {
   return { async scan() {
@@ -37,6 +38,8 @@ function scanner() {
 class SequenceAdapters {
   constructor(outputs) { this.outputs = [...outputs]; this.live = new Map(); this.prompts = []; }
   describe(providerKey) { return { providerKey, adapter: 'one-shot-subagent', taskExecution: true, capabilities: { oneShot: true, sessionResume: false } }; }
+  listAvailableRuntimes() { return [{ providerKey: 'subagent:codex', availability: 'AVAILABLE', authorized: true, taskExecution: true }]; }
+  prepareWorkspace() { return true; }
   assertCanStart() { return true; }
   async startRun(spec) { this.prompts.push(spec.prompt); this.live.set(spec.runId, spec); return { runId: spec.runId, taskId: spec.taskId, agentId: spec.agentId, runtimeRunId: `fake-${spec.runId}`, capabilities: { oneShot: true } }; }
   observeRun(runId) { return { runId, state: this.live.has(runId) ? 'RUNNING' : 'NOT_LIVE' }; }
@@ -164,6 +167,56 @@ test('CRITICAL review requires independent Reviewer approval before PL and forbi
   } finally { await close(fx); }
 });
 
+test('PL dispatches an independent Reviewer Run, replaced identities are rejected, and Human completes the Project', async () => {
+  const fx = await fixture([success()]);
+  let runtimeGovernance;
+  try {
+    let task = createAssigned(fx, 'Automated critical review', 'CRITICAL', 'REVIEWER_PL');
+    start(fx, task);
+    await waitFor(() => fx.store.getTask(task.id).status === 'SUBMITTED', 'critical submission');
+    task = fx.store.getTask(task.id);
+    const result = fx.store.getResult(task.resultId);
+    const oldReviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER' && agent.status === 'IDLE');
+    let state = fx.plane.replaceAgent({
+      actor: OWNER, operationId: operation('replace-reviewer'), projectId: fx.projectId,
+      expectedVersion: fx.store.getProject(fx.projectId).version, agentId: oldReviewer.id,
+    });
+    assert.throws(() => fx.governance.submitReview({
+      actor: { type: 'agent', id: oldReviewer.id }, operationId: operation('retired-reviewer'), taskId: task.id,
+      decision: 'APPROVE', issues: [], evidenceRefs: [result.evidenceRefs[0]],
+    }), (error) => error.code === 'REVIEWER_INACTIVE');
+
+    fx.adapters.outputs.push(reviewOutput(result.evidenceRefs[0]));
+    runtimeGovernance = new CollaborationGovernance({ store: fx.store, controlPlane: fx.plane, adapters: fx.adapters, logger: { error() {}, warn() {} } });
+    state = runtimeGovernance.requestIndependentReview({
+      actor: { type: 'pl', id: state.selected.project.leadAgentId }, operationId: operation('request-review'),
+      taskId: task.id,
+    });
+    assert.equal(['STARTING', 'RUNNING'].includes(state.selected.reviewRuns.at(-1).status), true);
+    await waitFor(() => fx.store.listReviewRuns(fx.projectId).at(-1)?.status === 'SUCCEEDED', 'independent review');
+    const reviewerDecision = fx.store.listReviews(fx.projectId).find((item) => item.taskId === task.id && item.reviewerRole === 'REVIEWER');
+    assert.equal(reviewerDecision.decision, 'APPROVE');
+    assert.notEqual(reviewerDecision.reviewerAgentId, oldReviewer.id);
+    assert.equal(fx.store.getTask(task.id).status, 'SUBMITTED');
+
+    state = runtimeGovernance.submitReview({
+      actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('pl-final'),
+      taskId: task.id, decision: 'APPROVE', issues: [], evidenceRefs: [result.evidenceRefs[0]],
+    });
+    assert.equal(state.selected.tasks.find((item) => item.id === task.id).status, 'VERIFIED');
+    state = fx.plane.completeProject({
+      actor: OWNER, operationId: operation('complete-project'), projectId: fx.projectId,
+      expectedVersion: state.selected.project.version,
+    });
+    assert.equal(state.selected.project.status, 'COMPLETED');
+    assert.equal(state.selected.agents.filter((agent) => agent.status !== 'REPLACED').every((agent) => agent.status === 'UNAVAILABLE'), true);
+    assert.equal(state.selected.activities.some((item) => item.eventType === 'PROJECT_COMPLETED'), true);
+  } finally {
+    await runtimeGovernance?.close();
+    await close(fx);
+  }
+});
+
 test('Request timeout returns a bounded timeout Response and never auto-reissues', async () => {
   const fx = await fixture([]);
   try {
@@ -179,6 +232,27 @@ test('Request timeout returns a bounded timeout Response and never auto-reissues
     assert.equal(state.selected.responses.at(-1).outcome, 'REQUEST_TIMEOUT');
     assert.equal(state.selected.tasks.find((item) => item.id === task.id).status, 'READY');
     assert.equal(state.selected.requests.length, 1);
+  } finally { await close(fx); }
+});
+
+test('Host restart recovery marks an active independent Review Run UNKNOWN and releases the Reviewer', async () => {
+  const fx = await fixture([success()]);
+  try {
+    const task = createAssigned(fx, 'Interrupted review', 'CRITICAL', 'REVIEWER_PL');
+    start(fx, task);
+    await waitFor(() => fx.store.getTask(task.id).status === 'SUBMITTED', 'review submission');
+    const submitted = fx.store.getTask(task.id);
+    const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER' && agent.status === 'IDLE');
+    fx.store.db.prepare(`INSERT INTO review_runs(id, task_id, result_id, reviewer_agent_id, provider_key,
+      runtime_session_ref, status, decision, error_code, error_message, raw_output_excerpt, started_at, ended_at, created_at)
+      VALUES('REVIEW-RUN-INTERRUPTED', ?, ?, ?, ?, 'runtime-review', 'RUNNING', NULL, NULL, NULL, NULL, ?, NULL, ?)`)
+      .run(submitted.id, submitted.resultId, reviewer.id, reviewer.providerKey, new Date().toISOString(), new Date().toISOString());
+    fx.store.db.prepare("UPDATE agents SET status='RUNNING' WHERE id=?").run(reviewer.id);
+    assert.equal(fx.governance.recoverInterruptedReviewRuns(), 1);
+    const recovered = fx.store.listReviewRuns(fx.projectId).at(-1);
+    assert.equal(recovered.status, 'UNKNOWN');
+    assert.equal(recovered.error.code, 'HOST_RESTART');
+    assert.equal(fx.store.listAgents(fx.projectId).find((agent) => agent.id === reviewer.id).status, 'IDLE');
   } finally { await close(fx); }
 });
 

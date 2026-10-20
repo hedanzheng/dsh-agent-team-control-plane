@@ -39,6 +39,8 @@ function scanner() {
 class SequenceAdapters {
   constructor(outputs) { this.outputs = [...outputs]; this.live = new Map(); this.prompts = []; }
   describe(providerKey) { return { providerKey, adapter: 'mock-one-shot-provider', taskExecution: true, capabilities: { oneShot: true, sessionResume: false } }; }
+  listAvailableRuntimes() { return [{ providerKey: 'subagent:codex', availability: 'AVAILABLE', authorized: true, taskExecution: true }]; }
+  prepareWorkspace() { return true; }
   assertCanStart() { return true; }
   async startRun(spec) { this.prompts.push(spec.prompt); this.live.set(spec.runId, spec); return { runtimeRunId: `mock-${spec.runId}`, capabilities: { oneShot: true } }; }
   observeRun(runId) { return { state: this.live.has(runId) ? 'RUNNING' : 'NOT_LIVE' }; }
@@ -210,6 +212,9 @@ test('Phase 5 client exposes all six Host-backed views without credential or cha
   assert.match(source, /ctx\.slots\.inject\('sidebar\.panellist'/);
   assert.doesNotMatch(source, /ctx\.slots\.inject\('shell\.overlay'/);
   assert.doesNotMatch(source, /position:\s*'fixed'/);
+  assert.match(source, /request-review/);
+  assert.match(source, /complete-project/);
+  assert.doesNotMatch(source, /Reviewer 通过|Reviewer 退回/);
   assert.match(source, /ctx\.uiWorkspace\.openWorkspace\(/);
   assert.match(source, /requestDraftInitialization\(/);
   assert.match(source, /\.input\.for\(binding\.ctx\)\.submit\(\)/);

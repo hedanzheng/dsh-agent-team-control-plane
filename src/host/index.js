@@ -75,8 +75,10 @@ export async function apply(ctx) {
   }
 
   const recoveredRuns = coordinator.recoverInterruptedRuns();
+  const recoveredReviewRuns = governance.recoverInterruptedReviewRuns();
   store.setSystemState('runtime_adapters', adapters.listAvailableRuntimes(), new Date().toISOString());
   store.setSystemState('task_run_recovery', { recoveredRuns }, new Date().toISOString());
+  store.setSystemState('review_run_recovery', { recoveredReviewRuns }, new Date().toISOString());
   coordinator.startWatchdog();
   const requestTimer = setInterval(() => {
     try { governance.timeoutExpiredRequests(); governance.dispatchPendingRequests(); }
@@ -118,6 +120,7 @@ export async function apply(ctx) {
           case 'propose-team': data = controlPlane.proposeTeam(body); break;
           case 'approve-team': data = controlPlane.approveTeam(body); break;
           case 'replace-agent': data = controlPlane.replaceAgent(body); break;
+          case 'complete-project': data = controlPlane.completeProject(body); break;
           case 'stop-project': data = controlPlane.stopProject(body); break;
           case 'create-task': data = controlPlane.createTask(body); break;
           case 'update-task': data = controlPlane.updateTask(body); break;
@@ -130,6 +133,7 @@ export async function apply(ctx) {
           case 'cancel-task-run': data = coordinator.cancelTaskRun(body); break;
           case 'respond-request': data = governance.respondRequest(body); break;
           case 'submit-review': data = governance.submitReview(body); break;
+          case 'request-review': data = governance.requestIndependentReview(body); break;
           case 'report-finding': data = governance.reportFinding(body); break;
           case 'update-finding': data = governance.updateFinding(body); break;
           case 'complete-plan-check': data = governance.completePlanCheck(body); break;

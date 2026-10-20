@@ -101,7 +101,7 @@ export class AgentTeamControlPlane {
     const replacement = this.firstUsableAuthorizedRuntime('external-worker');
     let changed = false;
     const repaired = members.map((member) => {
-      if (member.role !== 'WORKER') return member;
+      if (!['WORKER', 'REVIEWER'].includes(member.role)) return member;
       const runtime = this.store.getRuntime(member.providerKey);
       if (runtime?.availability === 'AVAILABLE' && runtime.authorized) return member;
       if (!replacement) return member;
@@ -258,6 +258,8 @@ export class AgentTeamControlPlane {
         409,
       );
     }
+    const reviewerRuntime = this.store.listRuntimes().find((runtime) => runtime.providerKey === 'subagent:spawn'
+      && runtime.kind === 'external-worker' && runtime.availability === 'AVAILABLE' && runtime.authorized) ?? external;
     const members = [
       {
         id: project.leadAgentId,
@@ -274,7 +276,7 @@ export class AgentTeamControlPlane {
       },
       {
         id: id('AGENT-REVIEWER'), displayName: 'Independent Reviewer',
-        providerKey: project.leadRuntimeKey, role: 'REVIEWER',
+        providerKey: reviewerRuntime.providerKey, role: 'REVIEWER',
         permissions: DEFAULT_ROLE_PERMISSIONS.REVIEWER, skills: [],
       },
     ];
@@ -375,7 +377,7 @@ export class AgentTeamControlPlane {
       this.store.db.prepare("UPDATE approvals SET status='APPROVED', payload_json=?, decided_by=?, decided_at=? WHERE id=?")
         .run(json({ ...approval.payload, members }), actorKey(who), at, approval.id);
       this.store.db.prepare("UPDATE projects SET status='ACTIVE', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
-      const repairSummary = repaired.changed ? `; stale Worker runtime rebound to ${repaired.replacement.providerKey}` : '';
+      const repairSummary = repaired.changed ? `; stale Worker/Reviewer runtime rebound to ${repaired.replacement.providerKey}` : '';
       this.activity({ operationId: op, projectId: project.id, eventType: 'TEAM_APPROVED', actor: who, objectRef: approval.id, summary: `Human approved ${members.length} Agent Record(s); all are idle and no runtime was started${repairSummary}`, at });
     });
     return this.store.snapshot(project.id);
@@ -439,6 +441,38 @@ export class AgentTeamControlPlane {
       this.store.db.prepare("UPDATE agents SET status='UNAVAILABLE', current_task_id=NULL WHERE project_id=? AND status <> 'REPLACED'").run(project.id);
       this.store.db.prepare("UPDATE projects SET status='STOPPED', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
       this.activity({ operationId: op, projectId: project.id, eventType: 'PROJECT_STOPPED', actor: who, objectRef: project.id, summary: reason, at });
+    });
+    return this.store.snapshot(project.id);
+  }
+
+  completeProject(input) {
+    const project = this.requireProject(input.projectId);
+    const who = this.assertHumanOwner(project, input.actor);
+    assertExpectedVersion(project, input.expectedVersion);
+    if (project.status === 'COMPLETED') return this.store.snapshot(project.id);
+    if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'only an ACTIVE project may be completed', 409);
+    const tasks = this.store.listTasks(project.id);
+    if (tasks.length === 0 || tasks.some((task) => task.status !== 'VERIFIED')) {
+      throw new ControlPlaneError('PROJECT_TASKS_INCOMPLETE', 'Project completion requires at least one Task and every Task must be VERIFIED', 409);
+    }
+    const activeRun = this.store.listTaskRuns(project.id).find((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
+    if (activeRun) throw new ControlPlaneError('ACTIVE_RUN_EXISTS', `Task Run ${activeRun.id} is still active`, 409);
+    const activeReview = this.store.listReviewRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
+    if (activeReview) throw new ControlPlaneError('ACTIVE_REVIEW_RUN_EXISTS', `Review Run ${activeReview.id} is still active`, 409);
+    const openRequest = this.store.listRequests(project.id).find((request) => ['PENDING', 'IN_PROGRESS'].includes(request.status));
+    if (openRequest) throw new ControlPlaneError('OPEN_REQUEST_EXISTS', `Request ${openRequest.id} must be resolved before Project completion`, 409);
+    const pendingProposal = this.store.listTaskProposals(project.id).find((proposal) => proposal.status === 'PENDING');
+    if (pendingProposal) throw new ControlPlaneError('PENDING_TASK_PROPOSAL_EXISTS', `Task Proposal ${pendingProposal.id} must be decided before Project completion`, 409);
+    const pendingPlanCheck = this.store.listPlanChecks(project.id).find((check) => check.status === 'PENDING');
+    if (pendingPlanCheck) throw new ControlPlaneError('PENDING_PLAN_CHECK_EXISTS', `Plan Check ${pendingPlanCheck.id} must be completed before Project completion`, 409);
+    const openFinding = this.store.listFindings(project.id).find((finding) => finding.status !== 'CLOSED');
+    if (openFinding) throw new ControlPlaneError('OPEN_FINDING_EXISTS', `Finding ${openFinding.id} must be closed before Project completion`, 409);
+    const op = this.assertNewOperation(input.operationId);
+    const at = now();
+    this.store.transaction(() => {
+      this.store.db.prepare("UPDATE agents SET status='UNAVAILABLE', current_task_id=NULL WHERE project_id=? AND status <> 'REPLACED'").run(project.id);
+      this.store.db.prepare("UPDATE projects SET status='COMPLETED', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
+      this.activity({ operationId: op, projectId: project.id, eventType: 'PROJECT_COMPLETED', actor: who, objectRef: project.id, summary: `Human accepted Project completion with ${tasks.length} VERIFIED Task(s)`, at });
     });
     return this.store.snapshot(project.id);
   }

@@ -42,6 +42,7 @@ function selectedState(snapshot) {
     results: selected.results,
     evidence: selected.evidence,
     reviews: selected.reviews,
+    reviewRuns: selected.reviewRuns,
     findings: selected.findings,
     planChecks: selected.planChecks,
     recentActivity: selected.activities.slice(-20),
@@ -196,6 +197,24 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
       },
     }),
     projectTool({
+      name: 'agent_team_request_review',
+      description: 'Start a real independent Reviewer Run for a SUBMITTED REVIEWER_PL Task. Wait for it to finish, then re-read Project state before the PL decision.',
+      parameters: {
+        project_id: { type: 'string', required: true },
+        task_id: { type: 'string', required: true },
+      },
+      bindParent,
+      execute(args, exec) {
+        const project = projectFor(controlPlane, args.project_id);
+        return governance.requestIndependentReview({
+          actor: { type: 'pl', id: project.leadAgentId },
+          operationId: operationId('request-review'),
+          taskId: args.task_id,
+          parentAgent: exec?.agent,
+        });
+      },
+    }),
+    projectTool({
       name: 'agent_team_review_task',
       description: 'Submit the PL review for a SUBMITTED Task using its authoritative Result evidence. For REVIEWER_PL policy, the independent Reviewer must approve first.',
       parameters: {
@@ -232,7 +251,7 @@ export function installPLBridge(ctx, services) {
   register(ctx.systemPrompt.section({
     name: 'agent-team-control-plane:pl-policy',
     order: ctx.systemPrompt.getSectionOrder('TEAM_POLICY'),
-    text: `When a conversation bootstrap identifies you as an Agent Team Control Plane Project Lead, the Control Plane is the source of truth. Call agent_team_project_state before describing status. Record Human interview answers with agent_team_record_interview, then wait for Human approval in the control console. Create, assign, and start formal work only with agent_team_* tools. Do not edit project files or run implementation commands from the PL conversation. Do not claim a Charter, Task, Run, review, or completion exists unless the latest tool result contains it.`,
+    text: `When a conversation bootstrap identifies you as an Agent Team Control Plane Project Lead, the Control Plane is the source of truth. Call agent_team_project_state before describing status. Record Human interview answers with agent_team_record_interview, then wait for Human approval in the control console. Create, assign, and start formal work only with agent_team_* tools. For REVIEWER_PL Tasks, call agent_team_request_review and wait for the independent Reviewer decision before calling agent_team_review_task. Do not edit project files or run implementation commands from the PL conversation. Do not claim a Charter, Task, Run, review, or completion exists unless the latest tool result contains it.`,
   }));
   return () => {
     for (const dispose of disposers.reverse()) dispose();

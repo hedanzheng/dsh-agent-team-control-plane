@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { RuntimeAdapterRegistry } from '../../src/host/runtime-adapter.js';
 
 function fixture({ provider = { name: 'fork', prepareContinuable() {} }, liveParent = true } = {}) {
@@ -83,4 +86,19 @@ test('cancelling an activation aborts and disposes the managed handle once', asy
   assert.equal(fx.registry.cancelRun('RUN-1', 'test cancellation'), true);
   await fx.registry.collectRunResult('RUN-1');
   assert.equal(fx.disposed(), 1);
+});
+
+test('workspace preflight reports missing read-only cwd and creates write-intent cwd', () => {
+  const fx = fixture();
+  const root = mkdtempSync(join(tmpdir(), 'agent-team-workspace-'));
+  const target = join(root, 'new-workspace');
+  try {
+    assert.throws(() => fx.registry.prepareWorkspace(target), (error) => error.code === 'RUNTIME_CWD_MISSING');
+    assert.equal(existsSync(target), false);
+    assert.equal(fx.registry.prepareWorkspace(target, { create: true }), target);
+    assert.equal(existsSync(target), true);
+    assert.throws(() => fx.registry.prepareWorkspace('relative-path', { create: true }), (error) => error.code === 'RUNTIME_CWD_INVALID');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

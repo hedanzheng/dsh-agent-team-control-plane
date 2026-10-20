@@ -21,10 +21,30 @@ function globRegex(pattern) {
   return new RegExp(`^${escaped}$`, 'i');
 }
 
-function inAllowedScope(relativePath, scope) {
+function normalizeScopePattern(root, pattern) {
+  if (typeof pattern !== 'string' || !pattern.trim()) return null;
+  const source = pattern.trim();
+  if (!isAbsolute(source)) return source.replaceAll('\\', '/').replace(/^\.\//, '');
+  const target = resolve(source);
+  if (!inside(root, target)) return null;
+  return relative(root, target).replaceAll('\\', '/');
+}
+
+function patternMatches(path, pattern) {
+  if (globRegex(pattern).test(path)) return true;
+  if (/[*?]/.test(pattern)) return false;
+  const normalized = pattern.replace(/\/$/, '');
+  return path === normalized || path.startsWith(`${normalized}/`);
+}
+
+function inAllowedScope(root, relativePath, scope) {
   const path = relativePath.replaceAll('\\', '/');
-  const forbidden = scope.forbidden.some((pattern) => globRegex(pattern).test(path));
-  const allowed = scope.allowed.some((pattern) => globRegex(pattern).test(path));
+  const forbidden = (scope?.forbidden ?? [])
+    .map((pattern) => normalizeScopePattern(root, pattern)).filter(Boolean)
+    .some((pattern) => patternMatches(path, pattern));
+  const allowed = (scope?.allowed ?? [])
+    .map((pattern) => normalizeScopePattern(root, pattern)).filter(Boolean)
+    .some((pattern) => patternMatches(path, pattern));
   return allowed && !forbidden;
 }
 
@@ -42,18 +62,19 @@ export async function verifyArtifacts(workspace, task, artifacts) {
   const root = resolve(workspace);
   const evidence = [];
   for (const ref of artifacts) {
-    const target = resolve(root, ref);
+    const target = isAbsolute(ref) ? resolve(ref) : resolve(root, ref);
+    const relativePath = relative(root, target).replaceAll('\\', '/');
     let status = 'FAILED';
     let details;
     try {
-      if (isAbsolute(ref) || !inside(root, target)) throw new Error('artifact escapes workspace');
-      if (!inAllowedScope(ref, task.scope)) throw new Error('artifact is outside Task allowed scope or matches forbidden scope');
+      if (!inside(root, target)) throw new Error('artifact escapes workspace');
+      if (!inAllowedScope(root, relativePath, task.scope)) throw new Error('artifact is outside Task allowed scope or matches forbidden scope');
       const info = await stat(target);
       if (!info.isFile()) throw new Error('artifact is not a regular file');
       status = 'VERIFIED';
-      details = { absolutePath: target, size: info.size, sha256: await sha256(target) };
+      details = { absolutePath: target, relativePath, size: info.size, sha256: await sha256(target) };
     } catch (error) {
-      details = { absolutePath: target, error: error instanceof Error ? error.message : String(error) };
+      details = { absolutePath: target, relativePath, error: error instanceof Error ? error.message : String(error) };
     }
     evidence.push({ kind: 'FILE', ref, status, details });
   }
@@ -62,8 +83,15 @@ export async function verifyArtifacts(workspace, task, artifacts) {
 
 function executePowerShell(command, cwd, timeoutMs) {
   const startedAt = new Date().toISOString();
+  const utf8Command = [
+    '$utf8 = [System.Text.UTF8Encoding]::new($false)',
+    '[Console]::InputEncoding = $utf8',
+    '[Console]::OutputEncoding = $utf8',
+    '$OutputEncoding = $utf8',
+    command,
+  ].join('; ');
   return new Promise((resolveResult) => {
-    execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], {
+    execFile('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', utf8Command], {
       cwd, windowsHide: true, timeout: timeoutMs, maxBuffer: 1024 * 1024, encoding: 'utf8',
     }, (error, stdout, stderr) => {
       const endedAt = new Date().toISOString();

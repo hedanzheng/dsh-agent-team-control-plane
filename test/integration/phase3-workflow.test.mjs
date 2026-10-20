@@ -29,6 +29,7 @@ function scanner() {
 class FakeAdapters {
   constructor(factory) { this.factory = factory; this.live = new Map(); }
   describe(providerKey) { return { providerKey, adapter: 'one-shot-subagent', taskExecution: true, capabilities: { oneShot: true, sessionResume: false } }; }
+  prepareWorkspace() { return true; }
   assertCanStart() { return true; }
   async startRun(spec) {
     const record = { state: 'RUNNING', cancelled: false, spec };
@@ -116,7 +117,9 @@ test('Phase 3 downgrades SUCCESS to PARTIAL when independent verification comman
     const state = fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [] });
     const runId = state.selected.taskRuns.at(-1).id;
     assert.equal((await waitTerminal(fx.store, runId)).status, 'SUCCEEDED');
-    assert.equal(fx.store.getResultByRun(runId).outcome, 'PARTIAL');
+    const result = fx.store.getResultByRun(runId);
+    assert.equal(result.outcome, 'PARTIAL');
+    assert.match(result.unresolved.join('\n'), /no verification command was configured/);
     assert.equal(fx.store.getTask(task.id).status, 'SUBMITTED');
   } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.root, { recursive: true, force: true }); }
 });

@@ -5,6 +5,7 @@ export const PROJECT_STATUS = Object.freeze([
   'CHARTER_PENDING_APPROVAL',
   'TEAM_PENDING_APPROVAL',
   'ACTIVE',
+  'COMPLETED',
   'STOPPED',
 ]);
 

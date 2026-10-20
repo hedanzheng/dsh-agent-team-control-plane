@@ -15,6 +15,7 @@ export class CollaborationGovernance {
     this.adapters = adapters;
     this.logger = logger;
     this.requestJobs = new Map();
+    this.reviewJobs = new Map();
   }
 
   responsePrompt(project, request, recipient) {
@@ -53,6 +54,47 @@ export class CollaborationGovernance {
       evidenceRefs: requireStringArray(value.evidenceRefs ?? [], 'response.evidenceRefs', { max: 32, itemMax: 1000 }),
       raw: text.slice(-12000),
     };
+  }
+
+  reviewPrompt(project, task, result, reviewer) {
+    const charter = this.store.getCurrentCharter(project.id);
+    const evidence = this.store.listEvidence(project.id).filter((item) => item.resultId === result.id);
+    return [
+      'You are an independent Reviewer for one submitted Agent Team Task.',
+      'Inspect the submitted Result, Host evidence, acceptance criteria, and workspace as needed. Do not modify files, create Tasks, delegate, or approve work without sufficient evidence.',
+      'AUTHORITATIVE_REVIEW_STATE',
+      JSON.stringify({
+        project: { id: project.id, workspaceDir: project.workspaceDir },
+        charter: { version: charter?.version, mission: charter?.mission, constraints: charter?.constraints },
+        reviewer: { id: reviewer.id, role: reviewer.role },
+        task: { id: task.id, title: task.title, goal: task.goal, scope: task.scope, acceptance: task.acceptance, controlLevel: task.controlLevel, reviewPolicy: task.reviewPolicy },
+        result: { id: result.id, outcome: result.outcome, changeSummary: result.changeSummary, artifacts: result.artifacts, verifiedActions: result.verifiedActions, testPlan: result.testPlan, risks: result.risks, unresolved: result.unresolved },
+        evidence,
+      }, null, 2),
+      'End with AGENT_TEAM_REVIEW_START, one JSON object, and AGENT_TEAM_REVIEW_END.',
+      JSON.stringify({ decision: 'APPROVE | REJECT', issues: ['required concrete issue when rejecting'], evidenceRefs: ['at least one current Result evidence id'] }),
+    ].join('\n\n');
+  }
+
+  parseReviewOutput(output, result) {
+    const text = Array.isArray(output) ? output.filter((item) => item?.type === 'text').map((item) => item.text).join('\n') : '';
+    const startMarker = 'AGENT_TEAM_REVIEW_START';
+    const endMarker = 'AGENT_TEAM_REVIEW_END';
+    const start = text.lastIndexOf(startMarker);
+    const end = start < 0 ? -1 : text.indexOf(endMarker, start + startMarker.length);
+    if (start < 0 || end < 0) throw new ControlPlaneError('REVIEW_PARSE_FAILED', 'Independent review markers are missing', 409);
+    let value;
+    try { value = JSON.parse(text.slice(start + startMarker.length, end).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
+    catch (error) { throw new ControlPlaneError('REVIEW_PARSE_FAILED', `Independent review JSON is invalid: ${error instanceof Error ? error.message : String(error)}`, 409); }
+    const decision = enumValue(value.decision, 'review.decision', ['APPROVE', 'REJECT']);
+    const issues = requireStringArray(value.issues ?? [], 'review.issues', { max: 32, itemMax: 2000 });
+    const evidenceRefs = requireStringArray(value.evidenceRefs ?? [], 'review.evidenceRefs', { min: 1, max: 32, itemMax: 1000 });
+    if (decision === 'REJECT' && issues.length === 0) throw new ControlPlaneError('REVIEW_ISSUES_REQUIRED', 'Independent Reviewer rejection requires at least one concrete issue', 409);
+    const validEvidence = new Set(result.evidenceRefs);
+    if (evidenceRefs.some((ref) => !validEvidence.has(ref))) {
+      throw new ControlPlaneError('REVIEW_EVIDENCE_INVALID', 'Independent review referenced evidence outside the current Result', 409);
+    }
+    return { decision, issues, evidenceRefs, raw: text.slice(-20000) };
   }
 
   dispatchPendingRequests() {
@@ -95,7 +137,7 @@ export class CollaborationGovernance {
     try {
       const started = await this.adapters.startRun({
         runId: requestRunId, taskId: request.sourceTaskId, agentId: recipient.id,
-        providerKey: recipient.providerKey, cwd: project.workspaceDir,
+        providerKey: recipient.providerKey, projectId: project.id, cwd: project.workspaceDir,
         label: `${request.id}-response`.slice(0, 100), prompt: this.responsePrompt(project, request, recipient),
       });
       const at = now();
@@ -131,7 +173,23 @@ export class CollaborationGovernance {
 
   async close() {
     for (const runId of this.requestJobs.keys()) this.adapters?.cancelRun(runId, 'Host shutdown');
-    await Promise.allSettled(this.requestJobs.values());
+    for (const runId of this.reviewJobs.keys()) this.adapters?.cancelRun(runId, 'Host shutdown');
+    await Promise.allSettled([...this.requestJobs.values(), ...this.reviewJobs.values()]);
+  }
+
+  recoverInterruptedReviewRuns() {
+    const rows = this.store.db.prepare("SELECT id, reviewer_agent_id, task_id FROM review_runs WHERE status IN ('STARTING','RUNNING')").all();
+    const at = now();
+    for (const row of rows) {
+      const task = this.store.getTask(row.task_id);
+      if (!task) continue;
+      this.store.transaction(() => {
+        this.store.db.prepare("UPDATE review_runs SET status='UNKNOWN', error_code='HOST_RESTART', error_message='Host restarted while independent review was active', ended_at=? WHERE id=?").run(at, row.id);
+        this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL AND status='RUNNING'").run(row.reviewer_agent_id);
+        this.controlPlane.activity({ operationId: `${row.id}:host-restart`, projectId: task.projectId, eventType: 'REVIEW_RUN_RECOVERED', actor: { type: 'agent', id: row.reviewer_agent_id }, objectRef: row.id, summary: 'Interrupted independent Review Run marked UNKNOWN; explicit retry is required', at });
+      });
+    }
+    return rows.length;
   }
 
   requestWouldCycle(projectId, fromAgentId, toAgentId) {
@@ -253,6 +311,7 @@ export class CollaborationGovernance {
     const actor = requireActor(input.actor);
     if (!['agent', 'pl'].includes(actor.type) || actor.id !== request.toAgentId) throw new ControlPlaneError('FORBIDDEN', 'only the addressed Agent may respond', 403);
     const recipient = this.controlPlane.requireProjectAgent(project, request.toAgentId);
+    if (['REPLACED', 'UNAVAILABLE'].includes(recipient.status)) throw new ControlPlaneError('RECEIVER_INACTIVE', `Request recipient ${recipient.id} is ${recipient.status}`, 409);
     if (recipient.currentTaskId && recipient.currentTaskId !== request.sourceTaskId) throw new ControlPlaneError('RECEIVER_BUSY', 'Request remains queued until recipient finishes its formal Task', 409);
     const outcome = enumValue(input.outcome, 'outcome', ['ANSWER', 'UNABLE_TO_ANSWER']);
     const body = requireString(input.body, 'body', { max: 5000 });
@@ -308,6 +367,7 @@ export class CollaborationGovernance {
     if (actor.type === 'agent') {
       const reviewer = this.controlPlane.requireProjectAgent(project, actor.id);
       if (reviewer.role !== 'REVIEWER' || !reviewer.permissions.includes('review:submit')) throw new ControlPlaneError('FORBIDDEN', 'Agent is not an authorized Reviewer', 403);
+      if (reviewer.status !== 'IDLE' || reviewer.currentTaskId) throw new ControlPlaneError('REVIEWER_INACTIVE', `Reviewer ${reviewer.id} is ${reviewer.status} and cannot submit a review`, 409);
       if (reviewer.id === task.assignedAgentId) throw new ControlPlaneError('SELF_REVIEW_FORBIDDEN', 'Implementer cannot review its own Result', 403);
       reviewerRole = 'REVIEWER'; reviewerAgentId = reviewer.id;
     } else if ((actor.type === 'pl' && actor.id === project.leadAgentId) || (actor.type === 'human' && actor.id === project.ownerId)) {
@@ -332,6 +392,106 @@ export class CollaborationGovernance {
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: `REVIEW_${decision}`, actor, objectRef: reviewId, summary: `${reviewerRole} ${decision}${finalApprove ? '; Task VERIFIED' : decision === 'REJECT' ? '; Task returned for rework' : '; awaiting PL'}`, at });
     });
     return this.store.snapshot(project.id);
+  }
+
+  requestIndependentReview(input) {
+    if (!this.adapters) throw new ControlPlaneError('REVIEW_RUNTIME_UNAVAILABLE', 'No runtime adapter is available for independent review', 409);
+    const task = this.store.getTask(requireString(input.taskId, 'taskId', { max: 128 }));
+    if (!task) throw new ControlPlaneError('TASK_NOT_FOUND', 'Task does not exist', 404);
+    const project = this.controlPlane.requireProject(task.projectId);
+    if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'Independent review requires an ACTIVE project', 409);
+    const actor = requireActor(input.actor);
+    const permitted = (actor.type === 'pl' && actor.id === project.leadAgentId)
+      || (actor.type === 'human' && actor.id === project.ownerId);
+    if (!permitted) throw new ControlPlaneError('FORBIDDEN', 'only the Human Owner or assigned PL may request independent review', 403);
+    if (task.status !== 'SUBMITTED' || !task.resultId) throw new ControlPlaneError('TASK_NOT_SUBMITTED', 'Independent review requires a submitted Task Result', 409);
+    if (task.reviewPolicy !== 'REVIEWER_PL') throw new ControlPlaneError('INDEPENDENT_REVIEW_NOT_REQUIRED', 'This Task does not use REVIEWER_PL policy', 409);
+    const result = this.store.getResult(task.resultId);
+    if (!result) throw new ControlPlaneError('RESULT_NOT_FOUND', 'Submitted Result is missing', 409);
+    const existingReview = this.store.db.prepare("SELECT id FROM reviews WHERE task_id=? AND result_id=? AND reviewer_role='REVIEWER' ORDER BY created_at DESC LIMIT 1").get(task.id, result.id);
+    if (existingReview) throw new ControlPlaneError('REVIEW_ALREADY_SUBMITTED', 'The current Result already has an independent Reviewer decision', 409);
+    const activeRun = this.store.db.prepare("SELECT id FROM review_runs WHERE task_id=? AND result_id=? AND status IN ('STARTING','RUNNING')").get(task.id, result.id);
+    if (activeRun) throw new ControlPlaneError('REVIEW_RUN_ALREADY_ACTIVE', `Independent review Run ${activeRun.id} is already active`, 409);
+    const reviewer = this.store.listAgents(project.id).find((agent) => agent.role === 'REVIEWER' && agent.status === 'IDLE' && !agent.currentTaskId);
+    if (!reviewer) throw new ControlPlaneError('REVIEWER_UNAVAILABLE', 'No current idle Reviewer Agent is available', 409);
+    const available = this.adapters.listAvailableRuntimes().filter((item) => item.taskExecution && item.availability === 'AVAILABLE' && item.authorized);
+    const runtime = available.find((item) => item.providerKey === reviewer.providerKey)
+      ?? available.find((item) => item.providerKey === 'subagent:spawn')
+      ?? available[0];
+    if (!runtime) throw new ControlPlaneError('REVIEW_RUNTIME_UNAVAILABLE', 'No authorized one-shot runtime can execute an independent review', 409);
+    this.adapters.prepareWorkspace(project.workspaceDir, { create: false });
+    this.adapters.assertCanStart({ providerKey: runtime.providerKey, projectId: project.id, parentAgent: input.parentAgent });
+    const operationId = this.controlPlane.assertNewOperation(input.operationId);
+    const reviewRunId = id('REVIEW-RUN');
+    const at = now();
+    this.store.transaction(() => {
+      this.store.db.prepare(`INSERT INTO review_runs(id, task_id, result_id, reviewer_agent_id, provider_key,
+        runtime_session_ref, status, decision, error_code, error_message, raw_output_excerpt, started_at, ended_at, created_at)
+        VALUES(?, ?, ?, ?, ?, NULL, 'STARTING', NULL, NULL, NULL, NULL, NULL, NULL, ?)`).run(
+        reviewRunId, task.id, result.id, reviewer.id, runtime.providerKey, at,
+      );
+      this.store.db.prepare("UPDATE agents SET status='RUNNING' WHERE id=?").run(reviewer.id);
+      this.controlPlane.activity({ operationId, projectId: project.id, eventType: 'REVIEW_RUN_CREATED', actor, objectRef: reviewRunId, summary: `Independent Reviewer ${reviewer.id} queued on ${runtime.providerKey} for ${task.id}`, at });
+    });
+    const job = Promise.resolve().then(() => this.executeReviewRun({ reviewRunId, project, task, result, reviewer, runtime, parentAgent: input.parentAgent }))
+      .catch((error) => this.logger.error(`Review Run ${reviewRunId} failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`))
+      .finally(() => this.reviewJobs.delete(reviewRunId));
+    this.reviewJobs.set(reviewRunId, job);
+    return this.store.snapshot(project.id);
+  }
+
+  async executeReviewRun({ reviewRunId, project, task, result, reviewer, runtime, parentAgent }) {
+    let timeout;
+    let timedOut = false;
+    let runtimeStarted = false;
+    try {
+      const started = await this.adapters.startRun({
+        runId: reviewRunId, taskId: task.id, agentId: reviewer.id, providerKey: runtime.providerKey,
+        projectId: project.id, parentAgent, cwd: project.workspaceDir,
+        label: `${task.id}-independent-review`.slice(0, 100), prompt: this.reviewPrompt(project, task, result, reviewer),
+      });
+      runtimeStarted = true;
+      const startedAt = now();
+      this.store.db.prepare("UPDATE review_runs SET status='RUNNING', runtime_session_ref=?, started_at=? WHERE id=?").run(started.runtimeRunId, startedAt, reviewRunId);
+      timeout = setTimeout(() => { timedOut = true; this.adapters.cancelRun(reviewRunId, 'Independent review timeout'); }, 180000);
+      const runtimeResult = await this.adapters.collectRunResult(reviewRunId);
+      if (runtimeResult.stopReason !== 'completed') {
+        const status = timedOut ? 'TIMED_OUT' : runtimeResult.stopReason === 'aborted' ? 'CANCELLED' : 'UNKNOWN';
+        await this.finishReviewRunFailure({ reviewRunId, project, reviewer, status, code: timedOut ? 'REVIEW_TIMEOUT' : 'REVIEW_RUNTIME_TERMINAL', message: `Runtime stop reason ${runtimeResult.stopReason}${runtimeResult.diagnostic ? `: ${runtimeResult.diagnostic}` : ''}` });
+        return;
+      }
+      const parsed = this.parseReviewOutput(runtimeResult.output, result);
+      this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL").run(reviewer.id);
+      this.submitReview({
+        actor: { type: 'agent', id: reviewer.id }, operationId: `${reviewRunId}:submit`, taskId: task.id,
+        decision: parsed.decision, issues: parsed.issues, evidenceRefs: parsed.evidenceRefs,
+      });
+      const endedAt = now();
+      this.store.transaction(() => {
+        this.store.db.prepare("UPDATE review_runs SET status='SUCCEEDED', decision=?, raw_output_excerpt=?, ended_at=? WHERE id=?").run(parsed.decision, parsed.raw, endedAt, reviewRunId);
+        this.controlPlane.activity({ operationId: `${reviewRunId}:terminal`, projectId: project.id, eventType: 'REVIEW_RUN_TERMINAL', actor: { type: 'agent', id: reviewer.id }, objectRef: reviewRunId, summary: `Independent Reviewer submitted ${parsed.decision} for ${task.id}`, at: endedAt });
+      });
+    } catch (error) {
+      await this.finishReviewRunFailure({
+        reviewRunId, project, reviewer, status: runtimeStarted ? 'UNKNOWN' : 'CANNOT_START',
+        code: error instanceof ControlPlaneError ? error.code : runtimeStarted ? 'REVIEW_RUNTIME_ERROR' : 'REVIEW_RUNTIME_START_FAILED',
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      this.adapters.disposeRun(reviewRunId);
+    }
+  }
+
+  async finishReviewRunFailure({ reviewRunId, project, reviewer, status, code, message }) {
+    const current = this.store.db.prepare('SELECT status FROM review_runs WHERE id=?').get(reviewRunId);
+    if (!current || !['STARTING', 'RUNNING'].includes(current.status)) return;
+    const at = now();
+    this.store.transaction(() => {
+      this.store.db.prepare('UPDATE review_runs SET status=?, error_code=?, error_message=?, ended_at=? WHERE id=?').run(status, code, message, at, reviewRunId);
+      this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL").run(reviewer.id);
+      this.controlPlane.activity({ operationId: `${reviewRunId}:failure`, projectId: project.id, eventType: 'REVIEW_RUN_FAILED', actor: { type: 'agent', id: reviewer.id }, objectRef: reviewRunId, summary: `${status}: ${code}: ${message}`, at });
+    });
   }
 
   returnForRework({ project, task, reviewId, actor, issues, evidenceRefs, at }) {

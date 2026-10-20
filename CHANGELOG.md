@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.6 - 2026-10-20
+
+- Added workspace preflight with write-intent directory creation and specific `RUNTIME_CWD_*` diagnostics.
+- Normalized absolute/relative artifact scopes, accepted safe absolute artifact references, and surfaced Host verification failures in `Result.unresolved` and Activity.
+- Forced UTF-8 PowerShell verification output on Windows PowerShell 5.1.
+- Added persisted independent Reviewer Runs plus the `agent_team_request_review` PL tool; removed UI identity spoofing and blocked `REPLACED`/inactive Reviewers.
+- Added the Human-owned `COMPLETED` Project terminal state and final acceptance action.
+- Added schema v5 review-run history and regression coverage for all reported failures.
+
 ## 0.5.5 - 2026-10-20
 
 - Replaced the invalid direct `provider.start()` Worker call with DSH's managed `subagents.startActivation()` entry point.
