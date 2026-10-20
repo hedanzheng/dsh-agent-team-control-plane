@@ -91,6 +91,26 @@ export class AgentTeamControlPlane {
     return runtime;
   }
 
+  firstUsableAuthorizedRuntime(kind) {
+    return this.store.listRuntimes().find((runtime) => runtime.kind === kind
+      && runtime.availability === 'AVAILABLE'
+      && runtime.authorized);
+  }
+
+  repairStaleWorkerRuntimes(members) {
+    const replacement = this.firstUsableAuthorizedRuntime('external-worker');
+    let changed = false;
+    const repaired = members.map((member) => {
+      if (member.role !== 'WORKER') return member;
+      const runtime = this.store.getRuntime(member.providerKey);
+      if (runtime?.availability === 'AVAILABLE' && runtime.authorized) return member;
+      if (!replacement) return member;
+      changed = true;
+      return { ...member, providerKey: replacement.providerKey };
+    });
+    return { members: repaired, changed, replacement };
+  }
+
   activity({ operationId, projectId, eventType, actor, objectRef, summary, at = now() }) {
     this.store.appendActivity({
       id: id('ACTIVITY'), operationId, projectId, eventType,
@@ -230,7 +250,14 @@ export class AgentTeamControlPlane {
     const op = this.assertNewOperation(input.operationId);
     const at = now();
     const teamApprovalId = id('APPROVAL');
-    const external = this.store.listRuntimes().find((runtime) => runtime.kind === 'external-worker' && runtime.availability === 'AVAILABLE' && runtime.authorized);
+    const external = this.firstUsableAuthorizedRuntime('external-worker');
+    if (!external) {
+      throw new ControlPlaneError(
+        'RUNTIME_UNAVAILABLE',
+        'authorize an AVAILABLE external-worker runtime before approving the Charter',
+        409,
+      );
+    }
     const members = [
       {
         id: project.leadAgentId,
@@ -242,7 +269,7 @@ export class AgentTeamControlPlane {
       },
       {
         id: id('AGENT-WORKER'), displayName: 'Implementation Worker',
-        providerKey: external?.providerKey ?? 'subagent:codex', role: 'WORKER',
+        providerKey: external.providerKey, role: 'WORKER',
         permissions: DEFAULT_ROLE_PERMISSIONS.WORKER, skills: [],
       },
       {
@@ -320,7 +347,8 @@ export class AgentTeamControlPlane {
     if (project.status !== 'TEAM_PENDING_APPROVAL') throw new ControlPlaneError('INVALID_STATE', 'project has no team awaiting approval', 409);
     const approval = this.store.pendingApproval(project.id, 'TEAM');
     if (!approval) throw new ControlPlaneError('APPROVAL_NOT_FOUND', 'pending team approval is missing', 409);
-    const members = this.normalizeTeam(project, approval.payload.members);
+    const repaired = this.repairStaleWorkerRuntimes(approval.payload.members);
+    const members = this.normalizeTeam(project, repaired.members);
     const op = this.assertNewOperation(input.operationId);
     const at = now();
     this.store.transaction(() => {
@@ -344,9 +372,11 @@ export class AgentTeamControlPlane {
           );
         }
       }
-      this.store.db.prepare("UPDATE approvals SET status='APPROVED', decided_by=?, decided_at=? WHERE id=?").run(actorKey(who), at, approval.id);
+      this.store.db.prepare("UPDATE approvals SET status='APPROVED', payload_json=?, decided_by=?, decided_at=? WHERE id=?")
+        .run(json({ ...approval.payload, members }), actorKey(who), at, approval.id);
       this.store.db.prepare("UPDATE projects SET status='ACTIVE', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
-      this.activity({ operationId: op, projectId: project.id, eventType: 'TEAM_APPROVED', actor: who, objectRef: approval.id, summary: `Human approved ${members.length} Agent Record(s); all are idle and no runtime was started`, at });
+      const repairSummary = repaired.changed ? `; stale Worker runtime rebound to ${repaired.replacement.providerKey}` : '';
+      this.activity({ operationId: op, projectId: project.id, eventType: 'TEAM_APPROVED', actor: who, objectRef: approval.id, summary: `Human approved ${members.length} Agent Record(s); all are idle and no runtime was started${repairSummary}`, at });
     });
     return this.store.snapshot(project.id);
   }

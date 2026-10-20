@@ -101,6 +101,17 @@ test('Phase 1 lifecycle is durable, bounded, authorized, and starts no runtimes'
     const proposed = selected.approvals.find((approval) => approval.kind === 'TEAM' && approval.status === 'PENDING').payload.members;
     assert.equal(proposed.length, 3);
 
+    // Regression: a proposal created before a later Host scan may retain a stale
+    // Worker key. Approval must rebind it to a currently authorized external runtime.
+    const runtimeChangedAt = new Date().toISOString();
+    store.upsertRuntime({
+      providerKey: 'subagent:spawn', kind: 'external-worker', displayName: 'spawn one-shot Worker',
+      availability: 'AVAILABLE', capabilities: { oneShot: true, sessionResume: false },
+      source: 'mock-host', lastScannedAt: runtimeChangedAt,
+    });
+    store.markUnseenRuntimesUnavailable(new Set(['harness:deepseek-official', 'subagent:spawn']), runtimeChangedAt);
+    store.setRuntimeAuthorized('subagent:spawn', true);
+
     const four = [...proposed, {
       id: 'AGENT-OVER-LIMIT', displayName: 'Extra', providerKey: 'subagent:codex',
       role: 'WORKER', permissions: ['task:execute-assigned'], skills: [],
@@ -119,6 +130,12 @@ test('Phase 1 lifecycle is durable, bounded, authorized, and starts no runtimes'
     assert.equal(selected.agents.length, 3);
     assert.deepEqual(new Set(selected.agents.map((agent) => agent.role)), new Set(['PROJECT_LEAD', 'WORKER', 'REVIEWER']));
     assert.ok(selected.agents.every((agent) => agent.status === 'IDLE' && agent.currentTaskId === null));
+    assert.equal(selected.agents.find((agent) => agent.role === 'WORKER').providerKey, 'subagent:spawn');
+    assert.equal(
+      selected.approvals.find((approval) => approval.kind === 'TEAM' && approval.status === 'APPROVED')
+        .payload.members.find((member) => member.role === 'WORKER').providerKey,
+      'subagent:spawn',
+    );
     assert.equal(counters.modelStarts, 0);
 
     assert.throws(() => plane.authorizeRuntime({

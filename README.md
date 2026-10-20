@@ -7,7 +7,7 @@ An **A-version MVP** control-plane plugin for DeepSeek Harness Desktop. It turns
 ## Compatibility
 
 - Verified host: DeepSeek Harness Desktop `0.2.1-rc.2`
-- Package: `@local/agent-team-control-plane@0.5.0`
+- Package: `@local/agent-team-control-plane@0.5.1`
 - Runtime: the Node.js runtime bundled with the verified host (`node:sqlite` required)
 - Platform verified: Windows Desktop / PowerShell 5.1+
 
@@ -33,7 +33,7 @@ Or build a local package and install it offline:
 
 ```powershell
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.5.0.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.5.1.tgz' --offline
 ```
 
 The plugin is activated by `cordis.patch.yml`. Restart the target Harness profile after installation.

@@ -7,7 +7,7 @@
 ## 兼容性
 
 - 已验证 Host：DeepSeek Harness Desktop `0.2.1-rc.2`
-- 包：`@local/agent-team-control-plane@0.5.0`
+- 包：`@local/agent-team-control-plane@0.5.1`
 - Runtime：已验证 Host 内置 Node.js，要求支持 `node:sqlite`
 - 已验证平台：Windows Desktop / PowerShell 5.1+
 
@@ -33,7 +33,7 @@ dsh plugin add github:hedanzheng/dsh-agent-team-control-plane
 
 ```powershell
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.5.0.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.5.1.tgz' --offline
 ```
 
 插件通过 `cordis.patch.yml` 激活。安装完成后重启目标 Harness Profile。
