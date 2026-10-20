@@ -42,8 +42,9 @@
   },
   "license": "MIT",
   "scripts": {
-    "test": "node --test test/unit/*.test.mjs test/integration/*.test.mjs",
+    "test": "node --test --test-concurrency=1 test/unit/*.test.mjs test/integration/*.test.mjs",
     "test:demo": "npm --prefix examples/taskflow-demo test",
     "pack:check": "npm pack --dry-run"
   }
 }
+
