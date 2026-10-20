@@ -78,10 +78,11 @@ function createAndAssign(fx, title = 'Run task') {
 }
 
 async function waitTerminal(store, runId) {
-  for (let index = 0; index < 200; index += 1) {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
     const run = store.getTaskRun(runId);
     if (run && !['CREATED', 'STARTING', 'RUNNING'].includes(run.status)) return run;
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error('Run did not become terminal');
 }
