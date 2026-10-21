@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.7 - 2026-10-21
+
+- Added Human-owned `STOPPED → ACTIVE` Project recovery while retaining cancelled Task and Agent replacement audit history.
+- Closing a Project now rejects queued collaboration Requests and blocks active Request/Review Runs, preventing cancelled Tasks from being revived after recovery.
+- Host restart recovery now marks interrupted collaboration Request Runs unknown, releases their Agents, and returns Requests to explicit handling instead of leaving Projects permanently blocked.
+- Kept Task, Run, Result, Evidence, and governance history visible in read-only mode for stopped and completed Projects.
+- Added a 3–8 Agent team-size selector; initial teams now contain one PL, one Reviewer, and the remaining slots as Workers, with explicit Worker assignment in the Task view.
+- Reworked Runtime Sources into separate PL model sources and Worker launch modes, clearly identifying `fork`/`spawn` as execution modes rather than model names.
+- Turned PL Chat into a stage-aware PL workbench with a clear purpose and next action.
+- Localized Project states and Activity titles/descriptions, moved raw English audit data into expandable technical details, and clarified why replacement history is retained.
+
 ## 0.5.6 - 2026-10-20
 
 - Added workspace preflight with write-intent directory creation and specific `RUNTIME_CWD_*` diagnostics.

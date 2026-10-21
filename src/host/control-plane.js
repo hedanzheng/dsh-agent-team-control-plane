@@ -162,7 +162,10 @@ export class AgentTeamControlPlane {
     const projectId = id('PROJECT');
     const leadAgentId = id('AGENT-PL');
     const at = now();
-    const maxAgents = requireInteger(input.maxAgents ?? 3, 'maxAgents', { min: 1, max: 32 });
+    // A usable team always contains one PL, at least one Worker, and one Reviewer.
+    // `maxAgents` is selected by the Human during Project creation and becomes the
+    // size of the initial team proposal (additional slots are Workers).
+    const maxAgents = requireInteger(input.maxAgents ?? 3, 'maxAgents', { min: 3, max: 32 });
     const replanEveryN = requireInteger(input.replanEveryN ?? 5, 'replanEveryN', { min: 1, max: 100 });
     const skillDiscovery = this.store.getSystemState('skill_discovery', { grillMeAvailable: false });
     const interviewMode = skillDiscovery.grillMeAvailable ? 'grill-me' : 'fallback';
@@ -260,6 +263,15 @@ export class AgentTeamControlPlane {
     }
     const reviewerRuntime = this.store.listRuntimes().find((runtime) => runtime.providerKey === 'subagent:spawn'
       && runtime.kind === 'external-worker' && runtime.availability === 'AVAILABLE' && runtime.authorized) ?? external;
+    const workerCount = project.maxAgents - 2;
+    const workers = Array.from({ length: workerCount }, (_unused, index) => ({
+      id: id('AGENT-WORKER'),
+      displayName: workerCount === 1 ? 'Implementation Worker' : `Implementation Worker ${index + 1}`,
+      providerKey: external.providerKey,
+      role: 'WORKER',
+      permissions: DEFAULT_ROLE_PERMISSIONS.WORKER,
+      skills: [],
+    }));
     const members = [
       {
         id: project.leadAgentId,
@@ -269,11 +281,7 @@ export class AgentTeamControlPlane {
         permissions: DEFAULT_ROLE_PERMISSIONS.PROJECT_LEAD,
         skills: this.store.getSystemState('skill_discovery', {}).grillMeAvailable ? ['grill-me'] : [],
       },
-      {
-        id: id('AGENT-WORKER'), displayName: 'Implementation Worker',
-        providerKey: external.providerKey, role: 'WORKER',
-        permissions: DEFAULT_ROLE_PERMISSIONS.WORKER, skills: [],
-      },
+      ...workers,
       {
         id: id('AGENT-REVIEWER'), displayName: 'Independent Reviewer',
         providerKey: reviewerRuntime.providerKey, role: 'REVIEWER',
@@ -286,7 +294,7 @@ export class AgentTeamControlPlane {
       this.store.db.prepare(`UPDATE projects SET charter_version=?, status='TEAM_PENDING_APPROVAL', version=version+1, updated_at=? WHERE id=?`).run(charter.version, at, project.id);
       this.store.db.prepare(`INSERT INTO approvals(id, project_id, kind, status, payload_json, requested_by, created_at)
         VALUES(?, ?, 'TEAM', 'PENDING', ?, ?, ?)`).run(teamApprovalId, project.id, json({ members }), project.leadAgentId, at);
-      this.activity({ operationId: op, projectId: project.id, eventType: 'CHARTER_APPROVED', actor: who, objectRef: charter.id, summary: `Human approved Charter v${charter.version}; PL proposed a three-person team`, at });
+      this.activity({ operationId: op, projectId: project.id, eventType: 'CHARTER_APPROVED', actor: who, objectRef: charter.id, summary: `Human approved Charter v${charter.version}; PL proposed a ${members.length}-agent team`, at });
     });
     return this.store.snapshot(project.id);
   }
@@ -429,11 +437,23 @@ export class AgentTeamControlPlane {
     if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'only an ACTIVE project may be stopped', 409);
     const activeRun = this.store.listTaskRuns(project.id).find((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
     if (activeRun) throw new ControlPlaneError('ACTIVE_RUN_EXISTS', `cancel active Run ${activeRun.id} before stopping the project`, 409);
+    const activeReview = this.store.listReviewRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
+    if (activeReview) throw new ControlPlaneError('ACTIVE_REVIEW_RUN_EXISTS', `wait for Review Run ${activeReview.id} before stopping the project`, 409);
+    const activeRequestRun = this.store.listRequestRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
+    if (activeRequestRun) throw new ControlPlaneError('ACTIVE_REQUEST_RUN_EXISTS', `wait for Request Run ${activeRequestRun.id} before stopping the project`, 409);
     const op = this.assertNewOperation(input.operationId);
     const reason = requireString(input.reason ?? 'Stopped by Human Owner', 'reason', { max: 2000 });
     const at = now();
     this.store.transaction(() => {
       const cancellable = this.store.listTasks(project.id).filter((task) => ['PENDING', 'READY', 'WAITING'].includes(task.status));
+      const openRequests = this.store.listRequests(project.id).filter((request) => ['PENDING', 'IN_PROGRESS'].includes(request.status));
+      for (const request of openRequests) {
+        this.store.db.prepare("UPDATE requests SET status='REJECTED', resolved_at=? WHERE id=?").run(at, request.id);
+        this.activity({
+          operationId: `${op}:${request.id}:closed`, projectId: project.id, eventType: 'REQUEST_REJECTED',
+          actor: who, objectRef: request.id, summary: 'Open collaboration Request closed because the Project was stopped', at,
+        });
+      }
       for (const task of cancellable) {
         this.store.db.prepare("UPDATE tasks SET status='CANCELLED', version=version+1, updated_at=? WHERE id=?").run(at, task.id);
         this.addTaskStateEvent({ taskId: task.id, fromStatus: task.status, toStatus: 'CANCELLED', actor: who, reason, at });
@@ -445,6 +465,38 @@ export class AgentTeamControlPlane {
     return this.store.snapshot(project.id);
   }
 
+  resumeProject(input) {
+    const project = this.requireProject(input.projectId);
+    const who = this.assertHumanOwner(project, input.actor);
+    assertExpectedVersion(project, input.expectedVersion);
+    if (project.status === 'ACTIVE') return this.store.snapshot(project.id);
+    if (project.status !== 'STOPPED') {
+      throw new ControlPlaneError('PROJECT_NOT_STOPPED', 'only a STOPPED project may be resumed', 409);
+    }
+    const activeRun = this.store.listTaskRuns(project.id).find((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
+    if (activeRun) throw new ControlPlaneError('ACTIVE_RUN_EXISTS', `Task Run ${activeRun.id} is still active`, 409);
+    const activeReview = this.store.listReviewRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
+    if (activeReview) throw new ControlPlaneError('ACTIVE_REVIEW_RUN_EXISTS', `Review Run ${activeReview.id} is still active`, 409);
+    const activeRequestRun = this.store.listRequestRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
+    if (activeRequestRun) throw new ControlPlaneError('ACTIVE_REQUEST_RUN_EXISTS', `Request Run ${activeRequestRun.id} is still active`, 409);
+    const op = this.assertNewOperation(input.operationId);
+    const at = now();
+    this.store.transaction(() => {
+      this.store.db.prepare("UPDATE agents SET status='IDLE', current_task_id=NULL WHERE project_id=? AND status <> 'REPLACED'").run(project.id);
+      this.store.db.prepare("UPDATE projects SET status='ACTIVE', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
+      this.activity({
+        operationId: op,
+        projectId: project.id,
+        eventType: 'PROJECT_RESUMED',
+        actor: who,
+        objectRef: project.id,
+        summary: 'Stopped Project resumed by Human Owner; retained history is unchanged and cancelled Tasks remain cancelled',
+        at,
+      });
+    });
+    return this.store.snapshot(project.id);
+  }
+
   completeProject(input) {
     const project = this.requireProject(input.projectId);
     const who = this.assertHumanOwner(project, input.actor);
@@ -452,8 +504,9 @@ export class AgentTeamControlPlane {
     if (project.status === 'COMPLETED') return this.store.snapshot(project.id);
     if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'only an ACTIVE project may be completed', 409);
     const tasks = this.store.listTasks(project.id);
-    if (tasks.length === 0 || tasks.some((task) => task.status !== 'VERIFIED')) {
-      throw new ControlPlaneError('PROJECT_TASKS_INCOMPLETE', 'Project completion requires at least one Task and every Task must be VERIFIED', 409);
+    const scopedTasks = tasks.filter((task) => task.status !== 'CANCELLED');
+    if (scopedTasks.length === 0 || scopedTasks.some((task) => task.status !== 'VERIFIED')) {
+      throw new ControlPlaneError('PROJECT_TASKS_INCOMPLETE', 'Project completion requires at least one non-cancelled Task and every non-cancelled Task must be VERIFIED', 409);
     }
     const activeRun = this.store.listTaskRuns(project.id).find((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
     if (activeRun) throw new ControlPlaneError('ACTIVE_RUN_EXISTS', `Task Run ${activeRun.id} is still active`, 409);
@@ -472,7 +525,7 @@ export class AgentTeamControlPlane {
     this.store.transaction(() => {
       this.store.db.prepare("UPDATE agents SET status='UNAVAILABLE', current_task_id=NULL WHERE project_id=? AND status <> 'REPLACED'").run(project.id);
       this.store.db.prepare("UPDATE projects SET status='COMPLETED', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
-      this.activity({ operationId: op, projectId: project.id, eventType: 'PROJECT_COMPLETED', actor: who, objectRef: project.id, summary: `Human accepted Project completion with ${tasks.length} VERIFIED Task(s)`, at });
+      this.activity({ operationId: op, projectId: project.id, eventType: 'PROJECT_COMPLETED', actor: who, objectRef: project.id, summary: `Human accepted Project completion with ${scopedTasks.length} VERIFIED Task(s)`, at });
     });
     return this.store.snapshot(project.id);
   }

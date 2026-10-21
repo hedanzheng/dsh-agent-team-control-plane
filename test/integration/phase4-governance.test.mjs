@@ -256,6 +256,45 @@ test('Host restart recovery marks an active independent Review Run UNKNOWN and r
   } finally { await close(fx); }
 });
 
+test('Host restart recovery marks an active collaboration Request Run UNKNOWN without replaying it', async () => {
+  const fx = await fixture([]);
+  try {
+    const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER');
+    fx.adapters.outputs.push(needsInput(reviewer.id, 'Recover this interrupted request'));
+    const task = createAssigned(fx, 'Interrupted request');
+    start(fx, task);
+    const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'request creation');
+    const at = new Date().toISOString();
+    fx.store.db.prepare(`INSERT INTO request_runs(id, request_id, agent_id, provider_key, runtime_session_ref,
+      status, terminal_kind, error_code, error_message, started_at, ended_at, created_at)
+      VALUES('REQUEST-RUN-INTERRUPTED', ?, ?, ?, 'runtime-request', 'RUNNING', NULL, NULL, NULL, ?, NULL, ?)`)
+      .run(request.id, reviewer.id, reviewer.providerKey, at, at);
+    fx.store.db.prepare("UPDATE requests SET status='IN_PROGRESS', started_at=? WHERE id=?").run(at, request.id);
+    fx.store.db.prepare("UPDATE agents SET status='RUNNING' WHERE id=?").run(reviewer.id);
+
+    assert.equal(fx.governance.recoverInterruptedRequestRuns(), 1);
+    assert.equal(fx.governance.recoverInterruptedRequestRuns(), 0);
+    const recovered = fx.store.listRequestRuns(fx.projectId).at(-1);
+    assert.equal(recovered.status, 'UNKNOWN');
+    assert.equal(recovered.terminalKind, 'UNKNOWN');
+    assert.equal(recovered.error.code, 'HOST_RESTART');
+    assert.ok(recovered.endedAt);
+    assert.equal(fx.store.getRequest(request.id).status, 'PENDING');
+    assert.equal(fx.store.getRequest(request.id).startedAt, null);
+    assert.equal(fx.store.listAgents(fx.projectId).find((agent) => agent.id === reviewer.id).status, 'IDLE');
+    assert.equal(fx.store.getTask(task.id).status, 'WAITING');
+    assert.equal(fx.store.getTask(task.id).waiting.onRef, request.id);
+    assert.equal(fx.store.listActivities(fx.projectId).filter((item) => item.eventType === 'REQUEST_RUN_RECOVERED').length, 1);
+    fx.governance.adapters = fx.adapters;
+    assert.equal(fx.governance.dispatchPendingRequests(), 0);
+    assert.equal(fx.store.listRequestRuns(fx.projectId).length, 1);
+
+    fx.governance.respondRequest({ actor: { type: 'agent', id: reviewer.id }, operationId: operation('recover-response'), requestId: request.id, outcome: 'ANSWER', body: 'Recovered through explicit handling', evidenceRefs: [] });
+    assert.equal(fx.store.getRequest(request.id).status, 'RESOLVED');
+    assert.equal(fx.store.getTask(task.id).status, 'READY');
+  } finally { await close(fx); }
+});
+
 test('A Task cannot exceed three active collaboration Requests across continuation Runs', async () => {
   const fx = await fixture([]);
   try {

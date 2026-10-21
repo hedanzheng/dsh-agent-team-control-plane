@@ -7,7 +7,7 @@ An **A-version MVP** control-plane plugin for DeepSeek Harness Desktop. It turns
 ## Compatibility
 
 - Verified host: DeepSeek Harness Desktop `0.2.1-rc.2`
-- Package: `@local/agent-team-control-plane@0.5.6`
+- Package: `@local/agent-team-control-plane@0.5.7`
 - Runtime: the Node.js runtime bundled with the verified host (`node:sqlite` required)
 - Platform verified: Windows Desktop / PowerShell 5.1+
 
@@ -15,7 +15,11 @@ An **A-version MVP** control-plane plugin for DeepSeek Harness Desktop. It turns
 
 - A left-sidebar **Agent Team** entry that opens a central full-page console instead of covering the active conversation
 - Six console tabs: **PL Chat**, **Project**, **Agents**, **Tasks**, **Approvals**, and **Activity**
-- A separate PL conversation for each Project; the plugin submits the startup message automatically and DeepSeek begins the interview immediately
+- A stage-aware PL workbench that explains what the PL does, shows the next action, and opens a seeded Project-specific PL conversation
+- Stopped Projects can be resumed; stopped/completed Task, Run, Result, Evidence, and governance history remains visible in read-only mode
+- Human-selectable 3–8 Agent teams (`1 PL + N Workers + 1 Reviewer`) with explicit Worker assignment
+- Runtime sources separated into PL model providers and Worker execution modes; `fork`/`spawn` are never presented as model names
+- Chinese Project states and Activity descriptions, with the original immutable audit record available under technical details
 - Seven Host-backed `agent_team_*` tools let the PL read and update authoritative control-plane state, including dispatching a real independent Reviewer Run
 - The PL only interviews, plans, orchestrates, and reviews; implementation must flow through formal Tasks, Worker assignment, and one-shot Runs
 - Host-owned SQLite state for Charter, Agents, Tasks, Runs, Results, Evidence, Requests, Responses, Reviews, Findings, Plan Checks, Decisions, and Activity
@@ -38,7 +42,7 @@ Or build a local package and install it offline:
 
 ```powershell
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.5.6.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.5.7.tgz' --offline
 ```
 
 The plugin is activated by `cordis.patch.yml`. Restart the target Harness profile after installation.

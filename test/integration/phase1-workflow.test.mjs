@@ -157,3 +157,54 @@ test('Phase 1 lifecycle is durable, bounded, authorized, and starts no runtimes'
   }
 });
 
+test('Human-selected team size creates one PL, one Reviewer, and the requested Worker count', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-team-size-'));
+  const store = new ControlPlaneStore(join(root, 'control-plane.sqlite'));
+  try {
+    const plane = new AgentTeamControlPlane(store, scanner({ scans: 0 }));
+    let state = await plane.rescanRuntimes({ actor: OWNER, operationId: operation('scan'), cwd: root });
+    for (const providerKey of ['harness:deepseek-official', 'subagent:codex']) {
+      state = plane.authorizeRuntime({ actor: OWNER, operationId: operation('auth'), providerKey, authorized: true });
+    }
+    assert.throws(() => plane.createProject({
+      actor: OWNER, operationId: operation('too-small'), ownerId: OWNER.id,
+      name: 'Invalid team', workspaceDir: root, initialGoal: 'Must reject a team smaller than the required roles.',
+      maxAgents: 2, leadRuntimeKey: 'harness:deepseek-official',
+    }), (error) => error.code === 'INVALID_INPUT');
+
+    state = plane.createProject({
+      actor: OWNER, operationId: operation('project'), ownerId: OWNER.id,
+      name: 'Five Agent team', workspaceDir: root, initialGoal: 'Create a five-Agent governed team.',
+      maxAgents: 5, leadRuntimeKey: 'harness:deepseek-official',
+    });
+    const projectId = state.selected.project.id;
+    state = plane.answerInterview({
+      actor: OWNER, operationId: operation('interview'), projectId,
+      expectedVersion: state.selected.project.version,
+      answers: { scope_allowed: ['src'], constraints: ['No dependencies'], success_criteria: ['Team has five active identities'] },
+    });
+    state = plane.approveCharter({
+      actor: OWNER, operationId: operation('charter'), projectId,
+      expectedVersion: state.selected.project.version,
+    });
+    const proposed = state.selected.approvals.find((item) => item.kind === 'TEAM' && item.status === 'PENDING').payload.members;
+    assert.equal(proposed.length, 5);
+    assert.equal(proposed.filter((item) => item.role === 'PROJECT_LEAD').length, 1);
+    assert.equal(proposed.filter((item) => item.role === 'WORKER').length, 3);
+    assert.equal(proposed.filter((item) => item.role === 'REVIEWER').length, 1);
+    assert.deepEqual(proposed.filter((item) => item.role === 'WORKER').map((item) => item.displayName), [
+      'Implementation Worker 1', 'Implementation Worker 2', 'Implementation Worker 3',
+    ]);
+
+    state = plane.approveTeam({
+      actor: OWNER, operationId: operation('team'), projectId,
+      expectedVersion: state.selected.project.version,
+    });
+    assert.equal(state.selected.agents.length, 5);
+    assert.equal(state.selected.agents.every((agent) => agent.status === 'IDLE'), true);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+

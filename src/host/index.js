@@ -75,9 +75,11 @@ export async function apply(ctx) {
   }
 
   const recoveredRuns = coordinator.recoverInterruptedRuns();
+  const recoveredRequestRuns = governance.recoverInterruptedRequestRuns();
   const recoveredReviewRuns = governance.recoverInterruptedReviewRuns();
   store.setSystemState('runtime_adapters', adapters.listAvailableRuntimes(), new Date().toISOString());
   store.setSystemState('task_run_recovery', { recoveredRuns }, new Date().toISOString());
+  store.setSystemState('request_run_recovery', { recoveredRequestRuns }, new Date().toISOString());
   store.setSystemState('review_run_recovery', { recoveredReviewRuns }, new Date().toISOString());
   coordinator.startWatchdog();
   const requestTimer = setInterval(() => {
@@ -122,6 +124,7 @@ export async function apply(ctx) {
           case 'replace-agent': data = controlPlane.replaceAgent(body); break;
           case 'complete-project': data = controlPlane.completeProject(body); break;
           case 'stop-project': data = controlPlane.stopProject(body); break;
+          case 'resume-project': data = controlPlane.resumeProject(body); break;
           case 'create-task': data = controlPlane.createTask(body); break;
           case 'update-task': data = controlPlane.updateTask(body); break;
           case 'assign-task': data = controlPlane.assignTask(body); break;

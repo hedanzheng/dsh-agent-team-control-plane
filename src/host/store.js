@@ -919,6 +919,7 @@ export class ControlPlaneStore {
         runtimeScan: this.getSystemState('runtime_scan', null),
         runtimeAdapters: this.getSystemState('runtime_adapters', []),
         taskRunRecovery: this.getSystemState('task_run_recovery', { recoveredRuns: 0 }),
+        requestRunRecovery: this.getSystemState('request_run_recovery', { recoveredRequestRuns: 0 }),
         reviewRunRecovery: this.getSystemState('review_run_recovery', { recoveredReviewRuns: 0 }),
       },
       selected: selected ? {

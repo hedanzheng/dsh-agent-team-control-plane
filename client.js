@@ -70,27 +70,109 @@ window.__ModuleLoader__.load({
       return h('button', { type: 'button', style: { ...styles.button, opacity: props.disabled ? 0.5 : 1 }, ...props }, children);
     }
 
+    const PROJECT_STATUS_LABELS = Object.freeze({
+      CHARTER_INTERVIEW: '需求访谈中',
+      CHARTER_PENDING_APPROVAL: '章程待批准',
+      TEAM_PENDING_APPROVAL: '团队待批准',
+      ACTIVE: '进行中',
+      STOPPED: '已停止（可恢复）',
+      COMPLETED: '已完成',
+    });
+    const AGENT_STATUS_LABELS = Object.freeze({
+      PENDING_APPROVAL: '待批准', IDLE: '空闲', RUNNING: '工作中',
+      UNAVAILABLE: '已停用', REPLACED: '已替换',
+    });
+    const TASK_STATUS_LABELS = Object.freeze({
+      PENDING: '等待依赖', READY: '可执行', RUNNING: '执行中', WAITING: '等待处理',
+      SUBMITTED: '待审核', VERIFIED: '已验收', FAILED: '失败', CANCELLED: '已取消',
+    });
+    const AVAILABILITY_LABELS = Object.freeze({
+      AVAILABLE: '可用', NOT_CONFIGURED: '未配置', UNAVAILABLE: '不可用',
+    });
+    const ACTIVITY_LABELS = Object.freeze({
+      RUNTIMES_SCANNED: '扫描运行环境', RUNTIME_AUTHORIZED: '授权运行环境', RUNTIME_REVOKED: '撤销运行环境授权',
+      PROJECT_CREATED: '创建项目', PROJECT_STOPPED: '停止项目', PROJECT_RESUMED: '恢复项目', PROJECT_COMPLETED: '完成项目',
+      CHARTER_DRAFTED: '生成章程草案', CHARTER_APPROVED: '批准章程', TEAM_PROPOSED: '提交团队方案', TEAM_APPROVED: '批准团队',
+      AGENT_REPLACED: '更换 Agent', TASK_CREATED: '创建任务', TASK_UPDATED: '更新任务', TASK_ASSIGNED: '指派任务',
+      TASK_UNASSIGNED: '释放任务指派', TASK_STATE_CHANGED: '任务状态变更', TASK_PROPOSED: '提议新任务', TASK_PROPOSAL_REJECTED: '驳回任务提议',
+      TASK_RUN_CREATED: '创建 Worker 运行', TASK_RUN_TERMINAL: 'Worker 运行结束', TASK_RUN_CANCEL_REQUESTED: '请求取消 Worker 运行',
+      TASK_RUN_RECOVERED_UNKNOWN: '恢复异常运行记录', REQUEST_RUN_STARTED: '启动协作请求处理', REQUEST_RUN_FAILED: '协作请求处理失败', REQUEST_RUN_RECOVERED: '恢复异常协作请求',
+      REQUEST_CREATED: '创建协作请求', REQUEST_REJECTED: '拒绝协作请求', REQUEST_RESOLVED: '完成协作请求', REQUEST_TIMED_OUT: '协作请求超时',
+      TASK_AUTO_VERIFIED: '自动验收任务', REVIEW_APPROVE: '审核通过', REVIEW_REJECT: '审核退回', REVIEW_RUN_CREATED: '创建独立审核',
+      REVIEW_RUN_TERMINAL: '独立审核结束', REVIEW_RUN_FAILED: '独立审核失败', REVIEW_RUN_RECOVERED: '恢复异常审核记录',
+      FINDING_OPENED: '记录问题', FINDING_TRIAGED: '更新问题状态', PLAN_CHECK_COMPLETED: '完成计划检查', DECISION_APPROVED: '记录已批准决策',
+    });
+    const ACTIVITY_DESCRIPTIONS = Object.freeze({
+      PROJECT_CREATED: '项目已经建立，并进入需求访谈阶段。', PROJECT_STOPPED: '项目已由负责人停止；未完成任务保留为审计记录。',
+      PROJECT_RESUMED: '项目已由负责人恢复，可以继续创建和执行新任务。', PROJECT_COMPLETED: '负责人已完成最终验收，项目进入只读状态。',
+      CHARTER_DRAFTED: '需求访谈结果已整理为项目章程草案。', CHARTER_APPROVED: '负责人已批准项目章程，系统已生成团队方案。',
+      TEAM_PROPOSED: 'PL 已提交团队成员方案，等待负责人确认。', TEAM_APPROVED: '负责人已批准团队，项目开始运行。',
+      AGENT_REPLACED: '旧 Agent 身份已停用，并创建了新的审计身份。', TASK_CREATED: '已建立正式任务并纳入依赖图。',
+      TASK_UPDATED: '任务定义或依赖已更新。', TASK_ASSIGNED: '任务已指派给 Worker，但运行尚未启动。', TASK_UNASSIGNED: '尚未启动的任务指派已释放。',
+      TASK_STATE_CHANGED: '任务状态已经更新。', TASK_PROPOSED: 'Agent 提交了任务建议；尚未成为正式任务。', TASK_PROPOSAL_REJECTED: '任务建议已被驳回。',
+      TASK_RUN_CREATED: '一次性 Worker 运行已加入队列。', TASK_RUN_TERMINAL: 'Worker 运行已结束，结果和任务状态已经保存。',
+      TASK_RUN_CANCEL_REQUESTED: '系统已向正在执行的 Worker 发送取消请求。', TASK_RUN_RECOVERED_UNKNOWN: 'Host 重启后将中断的运行标记为未知，等待人工处理。',
+      REQUEST_RUN_STARTED: '系统已启动一次受限的协作请求处理。', REQUEST_RUN_FAILED: '协作请求处理失败，请查看技术审计原文。', REQUEST_RUN_RECOVERED: 'Host 重启后已释放中断的协作请求运行，请求保留为待人工处理。',
+      REQUEST_CREATED: 'Agent 已创建协作请求，并等待接收者处理。', REQUEST_REJECTED: '协作请求被拒绝。', REQUEST_RESOLVED: '协作请求已处理完成。', REQUEST_TIMED_OUT: '协作请求已超时并停止自动重试。',
+      TASK_AUTO_VERIFIED: '常规任务已依据完整的 Host 证据自动验收。', REVIEW_APPROVE: '审核已通过；任务按治理规则进入下一状态。',
+      REVIEW_REJECT: '审核未通过；任务已退回修改。', REVIEW_RUN_CREATED: '独立 Reviewer 审核已加入队列。', REVIEW_RUN_TERMINAL: '独立 Reviewer 已提交审核结果。',
+      REVIEW_RUN_FAILED: '独立 Reviewer 运行失败，请查看技术审计原文。', REVIEW_RUN_RECOVERED: 'Host 重启后将中断的审核标记为未知。',
+      FINDING_OPENED: '审核过程中发现的问题已记录。', FINDING_TRIAGED: '问题状态已经更新。', PLAN_CHECK_COMPLETED: '阶段性计划检查已完成。',
+      DECISION_APPROVED: '一项已批准的项目决策已写入审计记录。', RUNTIMES_SCANNED: 'Host 已重新扫描可用模型来源和 Worker 运行方式。',
+      RUNTIME_AUTHORIZED: '负责人已允许控制面使用该运行环境。', RUNTIME_REVOKED: '负责人已撤销该运行环境的使用授权。',
+    });
+
+    function projectStatusLabel(status) { return PROJECT_STATUS_LABELS[status] || status; }
+    function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || status; }
+    function formatDateTime(value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function runtimePurpose(runtime) {
+      if (runtime.kind === 'harness-agent') return 'PL 对话模型来源';
+      if (runtime.providerKey === 'subagent:fork') return 'Worker 启动方式：继承当前 PL 的上下文（不是模型名称）';
+      if (runtime.providerKey === 'subagent:spawn') return 'Worker 启动方式：新建独立上下文（不是模型名称）';
+      return 'Worker 启动方式（不是模型名称）';
+    }
+
     function RuntimeCatalog({ data, ownerId, busy, act }) {
-      const cards = data.runtimes.map((runtime) => h('div', {
-        key: runtime.providerKey, style: styles.card, 'data-provider-key': runtime.providerKey,
-      },
-        h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-          h('span', null, h('strong', null, runtime.displayName), ` · ${runtime.kind}`),
-          h('span', { style: styles.tag }, runtime.availability)),
-        h('div', { style: { ...styles.row, marginTop: 6 } },
-          h('code', { style: { flex: 1 } }, runtime.providerKey),
-          h(Button, {
-            disabled: busy || runtime.availability !== 'AVAILABLE',
-            'data-testid': `authorize-${runtime.providerKey.replace(/[^a-z0-9]/gi, '-')}`,
-            onClick: () => act('authorize-runtime', {
-              actor: { type: 'human', id: ownerId }, providerKey: runtime.providerKey, authorized: !runtime.authorized,
-            }),
-          }, runtime.authorized ? '撤销授权' : '授权'))));
+      const runtimeCard = (runtime) => {
+        const models = runtime.capabilities?.models || [];
+        const worker = runtime.kind === 'external-worker';
+        return h('div', { key: runtime.providerKey, style: styles.card, 'data-provider-key': runtime.providerKey },
+          h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+            h('span', null, h('strong', null, runtime.displayName)),
+            h('span', { style: styles.tag }, AVAILABILITY_LABELS[runtime.availability] || runtime.availability)),
+          h('div', { style: { marginTop: 5 } }, runtimePurpose(runtime)),
+          runtime.kind === 'harness-agent' && h('div', { style: styles.muted }, models.length
+            ? `Host 报告的模型：${models.map((model) => model.name || model.id).join('、')}`
+            : 'Host 未报告可用模型。'),
+          worker && h('div', { style: styles.muted }, '具体大模型：Host 当前未报告；由 DSH 子代理或 Agent preset 决定。'),
+          h('div', { style: { ...styles.row, marginTop: 7 } },
+            h('span', { style: styles.tag }, runtime.authorized ? '已授权' : '未授权'),
+            h(Button, {
+              disabled: busy || runtime.availability !== 'AVAILABLE',
+              'data-testid': `authorize-${runtime.providerKey.replace(/[^a-z0-9]/gi, '-')}`,
+              onClick: () => act('authorize-runtime', {
+                actor: { type: 'human', id: ownerId }, providerKey: runtime.providerKey, authorized: !runtime.authorized,
+              }),
+            }, runtime.authorized ? '撤销授权' : '授权')),
+          h('details', { style: { marginTop: 7 } },
+            h('summary', { style: { cursor: 'pointer', ...styles.muted } }, '技术详情'),
+            h('div', { style: styles.muted }, `Provider：${runtime.providerKey}`),
+            h('div', { style: styles.muted }, `来源：${runtime.source || 'Host'}`)));
+      };
+      const plRuntimes = data.runtimes.filter((runtime) => runtime.kind === 'harness-agent');
+      const workerRuntimes = data.runtimes.filter((runtime) => runtime.kind === 'external-worker');
       return h('div', { style: styles.section, 'data-testid': 'runtime-catalog' },
         h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-          h('strong', null, 'Runtime Sources'),
+          h('strong', null, '模型与 Worker 运行方式'),
           h(Button, { disabled: busy, 'data-testid': 'rescan-runtimes', onClick: () => act('rescan-runtimes', { actor: { type: 'human', id: ownerId } }) }, '重新扫描')),
-        cards);
+        h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' } },
+          'PL 使用 Harness 报告的模型服务；fork / spawn 是 Worker 的启动方式，不是大模型名称。'),
+        h('div', { style: styles.section }, h('b', null, `PL 对话模型来源 · ${plRuntimes.length}`), plRuntimes.map(runtimeCard)),
+        h('div', { style: styles.section }, h('b', null, `Worker 启动方式 · ${workerRuntimes.length}`), workerRuntimes.map(runtimeCard)));
     }
 
     function ProjectForm({ data, ownerId, busy, act, defaultWorkspaceDir }) {
@@ -118,13 +200,21 @@ window.__ModuleLoader__.load({
       return h('div', { style: styles.section, 'data-testid': 'project-form' },
         h('strong', null, '创建 Project'),
         field('name', '名称'), field('workspaceDir', '工作目录'), field('initialGoal', '一句目标', true),
+        h('label', null, '团队 Agent 数量',
+          h('input', {
+            type: 'number', min: 3, max: 8, step: 1, style: styles.input,
+            value: form.maxAgents, 'data-testid': 'project-maxAgents',
+            onChange: (event) => setForm({ ...form, maxAgents: event.target.value }),
+          }),
+          h('div', { style: { ...styles.muted, marginBottom: 8 } },
+            `默认 3 个：1 个 PL + ${Math.max(1, Number(form.maxAgents || 3) - 2)} 个 Worker + 1 个独立 Reviewer。这里选择的是 Agent 身份数量，不代表不同大模型数量。`)),
         h('label', null, 'Project Lead Runtime',
           h('select', {
             style: styles.input, value: form.leadRuntimeKey, 'data-testid': 'project-leadRuntimeKey',
             onChange: (event) => setForm({ ...form, leadRuntimeKey: event.target.value }),
           }, h('option', { value: '' }, '请先授权 Harness Runtime'), harness.map((runtime) => h('option', { key: runtime.providerKey, value: runtime.providerKey }, runtime.displayName)))),
         h(Button, {
-          disabled: busy || !form.workspaceDir.trim() || !form.initialGoal.trim() || !form.leadRuntimeKey,
+          disabled: busy || !form.workspaceDir.trim() || !form.initialGoal.trim() || !form.leadRuntimeKey || Number(form.maxAgents) < 3 || Number(form.maxAgents) > 8,
           'data-testid': 'create-project',
           onClick: () => act('create-project', {
             actor: { type: 'human', id: ownerId }, ownerId, ...form, maxAgents: Number(form.maxAgents),
@@ -169,7 +259,7 @@ window.__ModuleLoader__.load({
             actor: { type: 'human', id: ownerId }, projectId: selected.project.id,
             expectedVersion: selected.project.version,
           }),
-        }, '批准 Charter 并接收 3 人团队建议'));
+        }, `批准 Charter 并接收 ${selected.project.maxAgents} 人团队建议`));
     }
 
     function TeamApproval({ selected, ownerId, busy, act }) {
@@ -189,18 +279,37 @@ window.__ModuleLoader__.load({
         }, '批准团队（仅建档，不启动模型）'));
     }
 
-    function PLChatView({ selected, busy, onOpenPLChat }) {
+    function PLChatView({ selected, busy, onOpenPLChat, onNavigate }) {
       const lead = selected?.agents?.find((agent) => agent.id === selected.project.leadAgentId);
+      const status = selected?.project?.status;
+      const steps = {
+        CHARTER_INTERVIEW: '在 PL 对话中补充范围、约束与验收标准；随后回到“审批”批准章程。',
+        CHARTER_PENDING_APPROVAL: '访谈已经完成。请到“审批”检查并批准项目章程。',
+        TEAM_PENDING_APPROVAL: '章程已经批准。请到“审批”确认团队成员方案。',
+        ACTIVE: '把新增需求、调整意见或失败反馈告诉 PL；PL 会拆分 Task、调度 Worker 并汇报结果。',
+        STOPPED: '项目当前已停止。先到“Project”恢复项目；已取消的历史 Task 不会自动复活。',
+        COMPLETED: '项目已经完成验收。控制台保留对话之外的任务、证据和审计历史。',
+      };
+      const canOpen = selected && !['STOPPED', 'COMPLETED'].includes(status);
       return h('section', { style: styles.section, 'aria-labelledby': 'pl-chat-heading', 'data-testid': 'view-pl-chat' },
         h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-          h('strong', { id: 'pl-chat-heading' }, 'PL Chat'),
-          h(Button, { disabled: !selected || busy, 'data-testid': 'open-pl-chat', onClick: () => onOpenPLChat(selected) }, '新建并启动 PL 对话')),
+          h('strong', { id: 'pl-chat-heading' }, 'PL 工作台'),
+          canOpen && h(Button, { disabled: busy, 'data-testid': 'open-pl-chat', onClick: () => onOpenPLChat(selected) }, '打开新的 PL 工作对话'),
+          selected && status === 'STOPPED' && h(Button, { disabled: busy, onClick: () => onNavigate('project') }, '前往恢复 Project'),
+          selected && status === 'COMPLETED' && h(Button, { disabled: busy, onClick: () => onNavigate('tasks') }, '查看交付历史')),
+        !selected && h('div', { style: styles.card }, '请先创建或选择 Project。'),
+        selected && h('div', { style: styles.card },
+          h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+            h('b', null, `当前阶段：${projectStatusLabel(status)}`),
+            h('span', { style: styles.tag }, lead ? 'PL 已建档' : 'PL 待建立')),
+          h('div', { style: { marginTop: 7 } }, h('b', null, '建议下一步：'), steps[status] || '查看 Project 状态并处理待办。')),
         h('div', { style: styles.card },
-          h('div', null, '每个 Project 使用独立的 DeepSeek 对话作为 Human 与 PL 的主要沟通窗口。'),
+          h('b', null, 'PL 对话有什么用？'),
+          h('div', { style: { marginTop: 6 } }, '它是你和团队的主要沟通入口：你只需描述目标、变更与反馈，PL 负责读取控制面状态、拆分任务、安排 Worker、发起审核并汇报结果。'),
           h('div', { style: styles.muted }, lead
             ? `${lead.displayName} · ${lead.id} · ${lead.providerKey}`
             : '创建 Project 后建立 Project Lead 身份。'),
-          h('div', { style: styles.muted }, '控制台负责 Project、审批、任务与审计；对话窗口负责向 PL 描述目标和反馈。')));
+          h('div', { style: styles.muted }, '控制台用于审批、人工干预和查看证据；通常的需求沟通放在 PL 对话。当前 Host 接口每次点击会新建一条已注入 Project 上下文的 PL 对话。')));
     }
 
     function ActiveTeam({ selected, ownerId, busy, act }) {
@@ -208,13 +317,16 @@ window.__ModuleLoader__.load({
       const activeAgents = selected.agents.filter((agent) => agent.status !== 'REPLACED');
       const replacedAgents = selected.agents.filter((agent) => agent.status === 'REPLACED');
       return h('div', { style: styles.section, 'data-testid': 'active-team' },
-        h('strong', null, `当前有效 Agent · ${activeAgents.length}/${selected.project.maxAgents}（已替换身份仅计入历史）`),
+        h('strong', null, `当前团队 · ${activeAgents.length}/${selected.project.maxAgents}`),
         activeAgents.map((agent) => h('div', { key: agent.id, style: styles.card, 'data-testid': 'agent-record' },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-            h('b', null, agent.displayName), h('span', { style: styles.tag }, agent.status)),
-          h('div', null, `${agent.role} · ${agent.providerKey}`),
-          h('div', { style: styles.muted }, `Permissions: ${agent.permissions.join(', ')}`),
-          h('div', { style: styles.muted }, `Skills: ${agent.skills.join(', ') || 'none'} · currentTaskId: ${agent.currentTaskId || 'none'}`),
+            h('b', null, agent.displayName), h('span', { style: styles.tag }, AGENT_STATUS_LABELS[agent.status] || agent.status)),
+          h('div', null, `${agent.role === 'PROJECT_LEAD' ? '项目负责人 PL' : agent.role === 'REVIEWER' ? '独立审核 Agent' : '执行 Worker'} · ${runtimePurpose({ kind: agent.role === 'PROJECT_LEAD' ? 'harness-agent' : 'external-worker', providerKey: agent.providerKey })}`),
+          h('details', { style: { marginTop: 7 } },
+            h('summary', { style: { cursor: 'pointer', ...styles.muted } }, '权限与技术详情'),
+            h('div', { style: styles.muted }, `Provider：${agent.providerKey}`),
+            h('div', { style: styles.muted }, `Permissions：${agent.permissions.join(', ')}`),
+            h('div', { style: styles.muted }, `Skills：${agent.skills.join(', ') || '无'} · 当前任务：${agent.currentTaskId || '无'}`)),
           agent.role !== 'PROJECT_LEAD' && agent.status === 'IDLE' && !agent.currentTaskId && replaceTarget !== agent.id && h(Button, {
             disabled: busy, 'data-testid': `replace-${agent.id}`, onClick: () => setReplaceTarget(agent.id),
           }, '更换此 Agent'),
@@ -232,19 +344,27 @@ window.__ModuleLoader__.load({
             }, '确认更换'),
             h(Button, { disabled: busy, onClick: () => setReplaceTarget('') }, '取消')))),
         replacedAgents.length > 0 && h('details', { style: styles.card },
-          h('summary', { style: { cursor: 'pointer' } }, `已替换历史 · ${replacedAgents.length}`),
-          replacedAgents.map((agent) => h('div', { key: agent.id, style: { ...styles.muted, marginTop: 7 } },
-            `${agent.displayName} · ${agent.role} · ${agent.providerKey} · ${agent.id}`))));
+          h('summary', { style: { cursor: 'pointer' } }, `替换审计记录 · ${replacedAgents.length}（通常无需查看）`),
+          h('div', { style: { ...styles.muted, marginTop: 7 } }, '这些旧身份必须保留，用来证明历史 Task、Run 和 Review 由谁完成；它们不占当前团队名额，也不会再次运行。'),
+          [...replacedAgents].reverse().slice(0, 5).map((agent) => {
+            const successor = selected.agents.find((item) => item.replacesAgentId === agent.id);
+            return h('details', { key: agent.id, style: { marginTop: 8 } },
+              h('summary', { style: { cursor: 'pointer' } }, `${agent.displayName} → ${successor?.displayName || '后续身份'}`),
+              h('div', { style: styles.muted }, `旧身份：${agent.id}`),
+              h('div', { style: styles.muted }, `新身份：${successor?.id || '未记录'} · ${agent.role} · ${agent.providerKey}`));
+          }),
+          replacedAgents.length > 5 && h('div', { style: { ...styles.muted, marginTop: 8 } }, `仅显示最近 5 条；其余 ${replacedAgents.length - 5} 条仍保存在 Host 审计库中。`)));
     }
 
-    function TaskBoard({ selected, busy, act }) {
+    function TaskBoard({ selected, busy, act, readOnly = false }) {
       const tasks = selected.tasks || [];
       const proposals = selected.taskProposals || [];
       const runs = selected.taskRuns || [];
       const results = selected.results || [];
       const evidence = selected.evidence || [];
-      const worker = selected.agents.find((agent) => agent.role === 'WORKER' && !['REPLACED', 'UNAVAILABLE'].includes(agent.status));
+      const workers = selected.agents.filter((agent) => agent.role === 'WORKER' && agent.status === 'IDLE' && !agent.currentTaskId);
       const [verificationCommand, setVerificationCommand] = React.useState('');
+      const [assigneeByTask, setAssigneeByTask] = React.useState({});
       const [form, setForm] = React.useState({
         title: '', goal: '', allowed: '', forbidden: '', acceptance: '', dependencies: '',
         controlLevel: 'IMPORTANT', reviewPolicy: 'PL',
@@ -256,8 +376,10 @@ window.__ModuleLoader__.load({
           onChange: (event) => setForm({ ...form, [name]: event.target.value }),
         }));
       return h('div', { style: styles.section, 'data-testid': 'task-board' },
-        h('strong', null, `Tasks · ${tasks.length}`),
-        h('div', { style: styles.card, 'data-testid': 'task-form' },
+        h('strong', null, `任务与运行记录 · ${tasks.length}`),
+        readOnly && h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' }, 'data-testid': 'task-read-only' },
+          `${projectStatusLabel(selected.project.status)}：以下内容为完整历史记录。恢复 Project 后可以创建和执行新任务，已取消的旧任务不会自动复活。`),
+        !readOnly && h('div', { style: styles.card, 'data-testid': 'task-form' },
           field('title', '标题'), field('goal', '目标', true), field('allowed', '允许范围（换行分隔）'),
           field('forbidden', '禁止范围（可空）'), field('acceptance', '验收标准（换行分隔）', true),
           field('dependencies', '依赖 Task ID（逗号分隔，可空）'),
@@ -287,26 +409,34 @@ window.__ModuleLoader__.load({
           }, 'PL 创建正式 Task')),
         tasks.map((task) => h('div', { key: task.id, style: styles.card, 'data-testid': 'task-record', 'data-task-id': task.id },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-            h('b', null, task.title), h('span', { style: styles.tag }, task.status)),
+            h('b', null, task.title), h('span', { style: styles.tag }, taskStatusLabel(task.status))),
           h('div', { style: styles.muted }, `${task.id} · v${task.version} · Charter v${task.charterVersion}`),
           h('div', null, `${task.controlLevel} / ${task.reviewPolicy} · assignee ${task.assignedAgentId || 'none'}`),
           h('div', { style: styles.muted }, `Dependencies: ${task.dependencies.join(', ') || 'none'}`),
           task.waiting && h('div', { style: styles.muted }, `Waiting: ${task.waiting.reason} · ${task.waiting.onRef}`),
-          task.status === 'READY' && !task.assignedAgentId && worker && h(Button, {
-            disabled: busy, 'data-testid': `assign-${task.id}`,
-            onClick: () => act('assign-task', {
-              actor: { type: 'pl', id: selected.project.leadAgentId }, projectId: selected.project.id,
-              taskId: task.id, expectedVersion: task.version, agentId: worker.id,
-            }),
-          }, `PL 指派给 ${worker.displayName}`),
-          task.status === 'READY' && task.assignedAgentId && h(Button, {
+          !readOnly && task.status === 'READY' && !task.assignedAgentId && workers.length > 0 && h('div', { style: { ...styles.row, marginTop: 7 } },
+            h('select', {
+              style: { ...styles.input, flex: 1, margin: 0 },
+              value: assigneeByTask[task.id] || workers[0].id,
+              'data-testid': `assignee-${task.id}`,
+              onChange: (event) => setAssigneeByTask({ ...assigneeByTask, [task.id]: event.target.value }),
+            }, workers.map((worker) => h('option', { key: worker.id, value: worker.id }, `${worker.displayName} · ${worker.id}`))),
+            h(Button, {
+              disabled: busy, 'data-testid': `assign-${task.id}`,
+              onClick: () => act('assign-task', {
+                actor: { type: 'pl', id: selected.project.leadAgentId }, projectId: selected.project.id,
+                taskId: task.id, expectedVersion: task.version, agentId: assigneeByTask[task.id] || workers[0].id,
+              }),
+            }, 'PL 指派')),
+          !readOnly && task.status === 'READY' && !task.assignedAgentId && workers.length === 0 && h('div', { style: styles.muted }, '当前没有空闲 Worker。'),
+          !readOnly && task.status === 'READY' && task.assignedAgentId && h(Button, {
             disabled: busy, 'data-testid': `unassign-${task.id}`,
             onClick: () => act('unassign-task', {
               actor: { type: 'pl', id: selected.project.leadAgentId }, projectId: selected.project.id,
               taskId: task.id, expectedVersion: task.version,
             }),
           }, '释放指派（未启动）'),
-          task.status === 'READY' && task.assignedAgentId && h('div', { style: { marginTop: 7 } },
+          !readOnly && task.status === 'READY' && task.assignedAgentId && h('div', { style: { marginTop: 7 } },
             h('input', {
               style: styles.input, value: verificationCommand,
               placeholder: 'Host 独立验证 PowerShell 命令（留空将得到 PARTIAL）',
@@ -338,7 +468,7 @@ window.__ModuleLoader__.load({
                 h('div', { style: styles.muted }, `Verified actions: ${result.verifiedActions.join('；') || 'none'}`),
                 result.unresolved?.length > 0 && h('div', { style: { ...styles.error, marginTop: 5 } }, `Unresolved: ${result.unresolved.join('；')}`),
                 runEvidence.map((item) => h('div', { key: item.id, style: styles.muted }, `${item.kind} ${item.status} · ${item.ref}`))),
-              active && h(Button, {
+              !readOnly && active && h(Button, {
                 disabled: busy, 'data-testid': `cancel-run-${run.id}`,
                 onClick: () => act('cancel-task-run', {
                   actor: { type: 'pl', id: selected.project.leadAgentId }, runId: run.id,
@@ -353,7 +483,7 @@ window.__ModuleLoader__.load({
             h('div', null, proposal.payload.goal)))));
     }
 
-    function GovernancePanel({ selected, ownerId, busy, act }) {
+    function GovernancePanel({ selected, ownerId, busy, act, readOnly = false }) {
       const requests = selected.requests || [];
       const responses = selected.responses || [];
       const reviews = selected.reviews || [];
@@ -376,6 +506,8 @@ window.__ModuleLoader__.load({
       });
       return h('div', { style: styles.section, 'data-testid': 'governance-panel' },
         h('strong', null, 'Requests · Reviews · Findings · Plan Checks'),
+        readOnly && h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' } },
+          `${projectStatusLabel(selected.project.status)}：审批与治理记录为只读。恢复 Project 后可继续处理新的治理事项。`),
         h('div', { style: styles.section, 'data-testid': 'approval-history' },
           h('b', null, `Approval History · ${selected.approvals.length}`),
           [...selected.approvals].reverse().map((approval) => h('div', { key: approval.id, style: styles.card },
@@ -391,7 +523,7 @@ window.__ModuleLoader__.load({
               h('div', null, `${requestItem.fromAgentId} → ${requestItem.toAgentId}`),
               h('div', { style: styles.muted }, requestItem.body),
               response && h('div', null, h('b', null, `${response.outcome}: `), response.body),
-              ['PENDING', 'IN_PROGRESS'].includes(requestItem.status) && h('div', null,
+              !readOnly && ['PENDING', 'IN_PROGRESS'].includes(requestItem.status) && h('div', null,
                 h('input', { style: styles.input, value: responseBody, placeholder: '受限 RESPONSE', 'data-testid': 'request-response-body', onChange: (event) => setResponseBody(event.target.value) }),
                 h(Button, {
                   disabled: busy || !responseBody.trim() || Boolean(target?.currentTaskId), 'data-testid': `respond-${requestItem.id}`,
@@ -400,21 +532,21 @@ window.__ModuleLoader__.load({
           })),
         submitted.length > 0 && h('div', { style: styles.section, 'data-testid': 'review-queue' },
           h('b', null, `Review Queue · ${submitted.length}`),
-          h('input', { style: styles.input, value: reviewIssue, placeholder: 'Reject 时填写明确问题', 'data-testid': 'review-issue', onChange: (event) => setReviewIssue(event.target.value) }),
+          !readOnly && h('input', { style: styles.input, value: reviewIssue, placeholder: 'Reject 时填写明确问题', 'data-testid': 'review-issue', onChange: (event) => setReviewIssue(event.target.value) }),
           submitted.map((task) => {
             const reviewerApproved = reviews.some((item) => item.taskId === task.id && item.resultId === task.resultId && item.reviewerRole === 'REVIEWER' && item.decision === 'APPROVE');
             const reviewRun = [...reviewRuns].reverse().find((item) => item.taskId === task.id && item.resultId === task.resultId);
             return h('div', { key: task.id, style: styles.card, 'data-testid': 'review-record' },
               h('div', { style: { ...styles.row, justifyContent: 'space-between' } }, h('b', null, task.title), h('span', { style: styles.tag }, task.reviewPolicy)),
-              task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && reviewer && h('div', { style: styles.row },
+              !readOnly && task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && reviewer && h('div', { style: styles.row },
                 h(Button, {
                   disabled: busy || ['STARTING', 'RUNNING'].includes(reviewRun?.status),
                   'data-testid': `request-review-${task.id}`,
                   onClick: () => act('request-review', { actor: { type: 'human', id: ownerId }, taskId: task.id }),
                 }, ['STARTING', 'RUNNING'].includes(reviewRun?.status) ? '独立 Reviewer 运行中' : '请求独立 Reviewer 运行')),
-              task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && !reviewer && h('div', { style: styles.error }, '当前没有可用 Reviewer；请先在 Agents 中更换 Reviewer。'),
+              !readOnly && task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && !reviewer && h('div', { style: styles.error }, '当前没有可用 Reviewer；请先在 Agents 中更换 Reviewer。'),
               reviewRun && h('div', { style: styles.muted }, `Review Run ${reviewRun.id} · ${reviewRun.status}${reviewRun.error ? ` · ${reviewRun.error.code}: ${reviewRun.error.message}` : ''}`),
-              (task.reviewPolicy !== 'REVIEWER_PL' || reviewerApproved) && h('div', { style: styles.row },
+              !readOnly && (task.reviewPolicy !== 'REVIEWER_PL' || reviewerApproved) && h('div', { style: styles.row },
                 h(Button, { disabled: busy, 'data-testid': `approve-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'APPROVE') }, 'PL 通过'),
                 h(Button, { disabled: busy, 'data-testid': `reject-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'REJECT') }, 'PL 退回')));
           })),
@@ -423,35 +555,40 @@ window.__ModuleLoader__.load({
           [...findings].reverse().map((finding) => h('div', { key: finding.id, style: styles.card },
             h('div', { style: { ...styles.row, justifyContent: 'space-between' } }, h('b', null, `${finding.severity} · ${finding.id}`), h('span', { style: styles.tag }, finding.status)),
             h('div', null, finding.description),
-            finding.status !== 'CLOSED' && h(Button, { disabled: busy, onClick: () => act('update-finding', { actor: { type: 'pl', id: lead }, findingId: finding.id, status: 'CLOSED' }) }, 'PL 关闭')))),
+            !readOnly && finding.status !== 'CLOSED' && h(Button, { disabled: busy, onClick: () => act('update-finding', { actor: { type: 'pl', id: lead }, findingId: finding.id, status: 'CLOSED' }) }, 'PL 关闭')))),
         h('div', { style: styles.section, 'data-testid': 'plan-checks' },
           h('b', null, `Plan Checks · ${planChecks.length}`),
           planChecks.map((plan) => h('div', { key: plan.id, style: styles.card },
             h('div', null, h('b', null, plan.trigger), ` · ${plan.status}`),
-            plan.status === 'PENDING' && h('div', null,
+            !readOnly && plan.status === 'PENDING' && h('div', null,
               h('input', { style: styles.input, value: planNotes, onChange: (event) => setPlanNotes(event.target.value) }),
               h(Button, { disabled: busy, onClick: () => act('complete-plan-check', { actor: { type: 'pl', id: lead }, planCheckId: plan.id, decision: 'KEEP_PLAN', notes: planNotes }) }, 'KEEP PLAN'))))),
         h('div', { style: styles.section, 'data-testid': 'decisions' },
           h('b', null, `Approved Decisions · ${decisions.length}`),
           decisions.map((item) => h('div', { key: item.id, style: styles.card }, h('b', null, item.title), h('div', null, item.body))),
-          h('input', { style: styles.input, value: decisionForm.title, placeholder: 'Decision 标题', onChange: (event) => setDecisionForm({ ...decisionForm, title: event.target.value }) }),
-          h('textarea', { style: styles.input, value: decisionForm.body, placeholder: '已批准决策正文', onChange: (event) => setDecisionForm({ ...decisionForm, body: event.target.value }) }),
-          h(Button, { disabled: busy || !decisionForm.title.trim() || !decisionForm.body.trim(), onClick: () => act('record-decision', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, title: decisionForm.title, body: decisionForm.body }) }, '记录批准 Decision')));
+          !readOnly && h('input', { style: styles.input, value: decisionForm.title, placeholder: 'Decision 标题', onChange: (event) => setDecisionForm({ ...decisionForm, title: event.target.value }) }),
+          !readOnly && h('textarea', { style: styles.input, value: decisionForm.body, placeholder: '已批准决策正文', onChange: (event) => setDecisionForm({ ...decisionForm, body: event.target.value }) }),
+          !readOnly && h(Button, { disabled: busy || !decisionForm.title.trim() || !decisionForm.body.trim(), onClick: () => act('record-decision', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, title: decisionForm.title, body: decisionForm.body }) }, '记录批准 Decision')));
     }
 
     function ActivityView({ selected }) {
       const activities = selected?.activities || [];
       return h('section', { style: styles.section, 'aria-labelledby': 'activity-heading', 'data-testid': 'view-activity' },
         h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-          h('strong', { id: 'activity-heading' }, 'Activity'),
+          h('strong', { id: 'activity-heading' }, '活动记录'),
           h('span', { style: styles.tag }, `${activities.length} 条`)),
-        !selected && h('div', { style: styles.card }, '创建并选择 Project 后显示 Host Activity。'),
+        h('div', { style: { ...styles.muted, marginTop: 6 } }, '默认显示中文说明；展开“技术审计原文”可查看 Host 保存的原始事件、对象 ID 与英文摘要。'),
+        !selected && h('div', { style: styles.card }, '创建并选择 Project 后显示 Host 活动记录。'),
         selected && h('div', { 'data-testid': 'activity-feed' },
           [...activities].reverse().map((item) => h('div', { key: item.id, style: styles.card },
             h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-              h('b', null, item.eventType), h('span', { style: styles.muted }, item.createdAt)),
-            h('div', { style: { marginTop: 5 } }, item.summary),
-            h('div', { style: styles.muted }, `${item.actorId} · ${item.objectRef}`)))));
+              h('b', null, ACTIVITY_LABELS[item.eventType] || '系统事件'), h('span', { style: styles.muted }, formatDateTime(item.createdAt))),
+            h('div', { style: { marginTop: 5 } }, ACTIVITY_DESCRIPTIONS[item.eventType] || '系统记录了一条审计事件；详细内容见技术审计原文。'),
+            h('details', { style: { marginTop: 7 } },
+              h('summary', { style: { cursor: 'pointer', ...styles.muted } }, '技术审计原文'),
+              h('div', { style: styles.muted }, `事件：${item.eventType}`),
+              h('div', { style: styles.muted }, `原文：${item.summary}`),
+              h('div', { style: styles.muted }, `操作者：${item.actorId} · 对象：${item.objectRef}`))))));
     }
 
     function ControlPlanePanel({ onClose, onOpenPLChat, defaultWorkspaceDir }) {
@@ -499,56 +636,74 @@ window.__ModuleLoader__.load({
 
       const selected = data?.selected;
       const tabs = [
-        ['pl-chat', 'PL 对话'], ['project', 'Project'], ['agents', 'Agents'],
-        ['tasks', 'Tasks'], ['approvals', 'Approvals'], ['activity', 'Activity'],
+        ['pl-chat', 'PL 工作台'], ['project', '项目'], ['agents', '团队'],
+        ['tasks', '任务'], ['approvals', '审批'], ['activity', '活动记录'],
       ];
+      const projectGroups = data ? [
+        ['进行中的项目', ['ACTIVE']],
+        ['等待配置或批准', ['CHARTER_INTERVIEW', 'CHARTER_PENDING_APPROVAL', 'TEAM_PENDING_APPROVAL']],
+        ['已停止（可恢复）', ['STOPPED']],
+        ['已完成', ['COMPLETED']],
+      ].map(([label, statuses]) => [label, data.projects.filter((project) => statuses.includes(project.status))])
+        .filter(([, projects]) => projects.length > 0) : [];
+      const scopedTasks = selected?.tasks?.filter((task) => task.status !== 'CANCELLED') || [];
+      const verifiedTasks = scopedTasks.filter((task) => task.status === 'VERIFIED');
+      const cancelledTasks = selected?.tasks?.filter((task) => task.status === 'CANCELLED') || [];
       const projectView = data && h('section', { 'aria-labelledby': 'project-heading', 'data-testid': 'view-project' },
         h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
           h('strong', { id: 'project-heading', style: { fontSize: 16 } }, 'Project'),
-          h(Button, { 'data-testid': 'new-project', onClick: () => setCreateMode(true) }, '新建 Project')),
+          h(Button, { 'data-testid': 'new-project', onClick: () => setCreateMode((value) => !value) }, createMode ? '收起创建表单' : '新建 Project')),
         h('label', null, 'Human Owner ID', h('input', { style: styles.input, value: ownerId, 'data-testid': 'owner-id', onChange: (e) => setOwnerId(e.target.value) })),
         data.projects.length > 0 && h('label', null, '当前 Project', h('select', {
           style: styles.input, value: selected?.project?.id || '', 'data-testid': 'project-selector',
           onChange: (event) => { setSelectedProjectId(event.target.value); setCreateMode(false); },
-        }, data.projects.map((project) => h('option', { key: project.id, value: project.id }, `${project.name} · ${project.status}`)))),
+        }, projectGroups.map(([label, projects]) => h('optgroup', { key: label, label },
+          projects.map((project) => h('option', { key: project.id, value: project.id }, `${project.name} · ${projectStatusLabel(project.status)}`)))))),
         selected && !createMode && h('div', { style: styles.card, 'data-testid': 'project-summary' },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-            h('strong', null, selected.project.name), h('span', { style: styles.tag, 'data-testid': 'project-status' }, selected.project.status)),
+            h('strong', null, selected.project.name), h('span', { style: styles.tag, 'data-testid': 'project-status' }, projectStatusLabel(selected.project.status))),
           h('div', { style: styles.muted }, `${selected.project.id} · owner ${selected.project.ownerId} · version ${selected.project.version}`),
           h('div', { style: styles.muted }, `Workspace: ${selected.project.workspaceDir}`),
           h('div', { style: { marginTop: 8 } }, h('b', null, 'Mission: '), (selected.charters.find((charter) => charter.version === selected.project.charterVersion) || selected.charters.at(-1))?.mission || selected.project.initialGoal),
-          h('div', { style: styles.muted }, `Milestone: ${(selected.tasks.find((task) => !['VERIFIED', 'CANCELLED'].includes(task.status)) || {}).title || 'all scoped tasks complete'} · Completion ${selected.tasks.filter((task) => task.status === 'VERIFIED').length}/${selected.tasks.length}`),
+          h('div', { style: styles.muted }, `当前里程碑：${(scopedTasks.find((task) => task.status !== 'VERIFIED') || {}).title || '范围内任务均已完成'} · 验收 ${verifiedTasks.length}/${scopedTasks.length}${cancelledTasks.length ? ` · 历史取消 ${cancelledTasks.length}` : ''}`),
           h('div', { style: { ...styles.row, marginTop: 9 } },
-            h(Button, { disabled: busy, 'data-testid': 'open-project-pl-chat', onClick: () => launchPLChat(selected) }, '新建并启动 PL 对话'),
-            selected.project.status === 'ACTIVE' && selected.tasks.length > 0 && selected.tasks.every((task) => task.status === 'VERIFIED') && h(Button, {
+            !['STOPPED', 'COMPLETED'].includes(selected.project.status) && h(Button, { disabled: busy, 'data-testid': 'open-project-pl-chat', onClick: () => launchPLChat(selected) }, '打开新的 PL 工作对话'),
+            selected.project.status === 'STOPPED' && h(Button, {
+              disabled: busy, 'data-testid': 'resume-project',
+              onClick: () => act('resume-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version }),
+            }, '恢复 Project'),
+            selected.project.status === 'ACTIVE' && scopedTasks.length > 0 && scopedTasks.every((task) => task.status === 'VERIFIED') && h(Button, {
               disabled: busy, 'data-testid': 'complete-project',
               onClick: () => act('complete-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version }),
             }, '验收并完成 Project'),
             selected.project.status === 'ACTIVE' && h(Button, {
               disabled: busy, 'data-testid': 'stop-project',
-              onClick: () => act('stop-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version, reason: 'Stopped by Human Owner from Control Plane' }),
-            }, '停止 Project'))),
+              onClick: () => {
+                if (!globalThis.confirm('停止后，未开始或等待中的 Task 会记为“已取消”，但 Project 之后可以恢复并创建新 Task。确认停止？')) return;
+                act('stop-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version, reason: '由 Human Owner 在控制台停止' });
+              },
+            }, '停止 Project（可恢复）'))),
         (!selected || createMode) && h(ProjectForm, { data, ownerId, busy, act, defaultWorkspaceDir }),
         h(RuntimeCatalog, { data, ownerId, busy, act }));
 
       let view;
       if (!data) view = h('p', null, '正在读取 Host 状态…');
-      else if (activeView === 'pl-chat') view = h(PLChatView, { selected, busy, onOpenPLChat: launchPLChat });
+      else if (activeView === 'pl-chat') view = h(PLChatView, { selected, busy, onOpenPLChat: launchPLChat, onNavigate: setActiveView });
       else if (activeView === 'project') view = projectView;
       else if (activeView === 'agents') view = h('section', { 'aria-labelledby': 'agents-heading', 'data-testid': 'view-agents' },
         h('strong', { id: 'agents-heading', style: { fontSize: 16 } }, 'Agents'),
         selected && !createMode ? h(ActiveTeam, { selected, ownerId, busy, act }) : h('div', { style: styles.card }, '创建并选择 Project 后显示 Agent Records。'));
       else if (activeView === 'tasks') view = h('section', { 'aria-labelledby': 'tasks-heading', 'data-testid': 'view-tasks' },
         h('strong', { id: 'tasks-heading', style: { fontSize: 16 } }, 'Tasks'),
-        selected && !createMode && selected.project.status === 'ACTIVE'
-          ? h(TaskBoard, { selected, busy, act })
+        selected && !createMode && ['ACTIVE', 'STOPPED', 'COMPLETED'].includes(selected.project.status)
+          ? h(TaskBoard, { selected, busy, act, readOnly: selected.project.status !== 'ACTIVE' })
           : h('div', { style: styles.card }, 'Task DAG 在 Project ACTIVE 后启用。'));
       else if (activeView === 'approvals') view = h('section', { 'aria-labelledby': 'approvals-heading', 'data-testid': 'view-approvals' },
         h('strong', { id: 'approvals-heading', style: { fontSize: 16 } }, 'Approvals & Governance'),
         selected && !createMode && selected.project.status === 'CHARTER_INTERVIEW' && h(Interview, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'CHARTER_PENDING_APPROVAL' && h(CharterApproval, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'TEAM_PENDING_APPROVAL' && h(TeamApproval, { selected, ownerId, busy, act }),
-        selected && !createMode && ['ACTIVE', 'COMPLETED', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, { selected, ownerId, busy, act }),
+        selected && !createMode && ['ACTIVE', 'COMPLETED', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, { selected, ownerId, busy, act, readOnly: selected.project.status !== 'ACTIVE' }),
         (!selected || createMode) && h('div', { style: styles.card }, '创建并选择 Project 后显示审批队列。'));
       else view = h(ActivityView, { selected });
 
@@ -556,7 +711,7 @@ window.__ModuleLoader__.load({
         h('header', { style: styles.header },
           h('div', { style: { minWidth: 0 } },
             h('strong', { style: { display: 'block', fontSize: 18 } }, 'Agent Team Control Plane'),
-            h('div', { style: styles.muted }, selected ? `${selected.project.name} · ${selected.project.status}` : 'Project、Agent、Task 与审批控制台')),
+            h('div', { style: styles.muted }, selected ? `${selected.project.name} · ${projectStatusLabel(selected.project.status)}` : 'Project、Agent、Task 与审批控制台')),
           h(Button, { 'data-testid': 'close-control-plane', onClick: onClose }, '返回对话')),
         h('nav', { style: styles.tabBar, 'aria-label': 'Control Plane views' },
           tabs.map(([id, label]) => h('button', {

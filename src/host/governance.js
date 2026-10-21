@@ -103,6 +103,20 @@ export class CollaborationGovernance {
     const pending = this.store.db.prepare("SELECT id FROM requests WHERE status='PENDING' ORDER BY created_at").all();
     for (const row of pending) {
       const request = this.store.getRequest(row.id);
+      const project = this.store.getProject(request.projectId);
+      const sourceTask = this.store.getTask(request.sourceTaskId);
+      if (project?.status !== 'ACTIVE' || sourceTask?.status !== 'WAITING' || sourceTask.waiting?.onRef !== request.id) {
+        const at = now();
+        this.store.transaction(() => {
+          this.store.db.prepare("UPDATE requests SET status='REJECTED', resolved_at=? WHERE id=? AND status='PENDING'").run(at, request.id);
+          this.controlPlane.activity({
+            operationId: `${request.id}:dispatch-guard`, projectId: request.projectId, eventType: 'REQUEST_REJECTED',
+            actor: { type: 'pl', id: 'request-guard' }, objectRef: request.id,
+            summary: 'Stale collaboration Request rejected because its Project is inactive or source Task is no longer waiting', at,
+          });
+        });
+        continue;
+      }
       const recipient = this.store.listAgents(request.projectId).find((agent) => agent.id === request.toAgentId);
       if (!recipient || recipient.currentTaskId || recipient.status !== 'IDLE') continue;
       const descriptor = this.adapters.describe(recipient.providerKey);
@@ -115,6 +129,10 @@ export class CollaborationGovernance {
 
   startRequestRunInternal(request, recipient) {
     const project = this.controlPlane.requireProject(request.projectId);
+    const sourceTask = this.store.getTask(request.sourceTaskId);
+    if (project.status !== 'ACTIVE' || sourceTask?.status !== 'WAITING' || sourceTask.waiting?.onRef !== request.id) {
+      throw new ControlPlaneError('REQUEST_SOURCE_NOT_WAITING', 'Request Run requires an ACTIVE Project and its source Task waiting on this Request', 409);
+    }
     const requestRunId = id('REQUEST-RUN');
     const at = now();
     this.store.transaction(() => {
@@ -151,7 +169,7 @@ export class CollaborationGovernance {
       const parsed = this.parseResponseOutput(result.output);
       const endedAt = now();
       this.store.db.prepare("UPDATE request_runs SET status='SUCCEEDED', terminal_kind=?, ended_at=? WHERE id=?").run(parsed.outcome, endedAt, requestRunId);
-      this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL").run(recipient.id);
+      this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL AND status='RUNNING'").run(recipient.id);
       this.respondRequest({ actor: { type: recipient.role === 'PROJECT_LEAD' ? 'pl' : 'agent', id: recipient.id }, operationId: `${requestRunId}:response`, requestId: request.id, outcome: parsed.outcome, body: parsed.body, evidenceRefs: parsed.evidenceRefs });
     } catch (error) {
       await this.finishRequestRunFailure({ requestRunId, request, recipient, status: 'UNKNOWN', code: 'REQUEST_RUNTIME_ERROR', message: error instanceof Error ? error.message : String(error) });
@@ -166,7 +184,7 @@ export class CollaborationGovernance {
     this.store.transaction(() => {
       this.store.db.prepare('UPDATE request_runs SET status=?, terminal_kind=?, error_code=?, error_message=?, ended_at=? WHERE id=?').run(status, status, code, message, at, requestRunId);
       this.store.db.prepare("UPDATE requests SET status='PENDING', started_at=NULL WHERE id=? AND status='IN_PROGRESS'").run(request.id);
-      this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL").run(recipient.id);
+      this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL AND status='RUNNING'").run(recipient.id);
       this.controlPlane.activity({ operationId: `${requestRunId}:failure`, projectId: request.projectId, eventType: 'REQUEST_RUN_FAILED', actor: { type: 'agent', id: recipient.id }, objectRef: requestRunId, summary: `${status}: ${message}; Request remains queued for explicit handling`, at });
     });
   }
@@ -175,6 +193,22 @@ export class CollaborationGovernance {
     for (const runId of this.requestJobs.keys()) this.adapters?.cancelRun(runId, 'Host shutdown');
     for (const runId of this.reviewJobs.keys()) this.adapters?.cancelRun(runId, 'Host shutdown');
     await Promise.allSettled([...this.requestJobs.values(), ...this.reviewJobs.values()]);
+  }
+
+  recoverInterruptedRequestRuns() {
+    const rows = this.store.db.prepare(`SELECT x.id, x.request_id, x.agent_id, r.project_id
+      FROM request_runs x JOIN requests r ON r.id=x.request_id
+      WHERE x.status IN ('STARTING','RUNNING')`).all();
+    const at = now();
+    for (const row of rows) {
+      this.store.transaction(() => {
+        this.store.db.prepare("UPDATE request_runs SET status='UNKNOWN', terminal_kind='UNKNOWN', error_code='HOST_RESTART', error_message='Host restarted while collaboration Request processing was active', ended_at=? WHERE id=? AND status IN ('STARTING','RUNNING')").run(at, row.id);
+        this.store.db.prepare("UPDATE requests SET status='PENDING', started_at=NULL WHERE id=? AND status='IN_PROGRESS'").run(row.request_id);
+        this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL AND status='RUNNING'").run(row.agent_id);
+        this.controlPlane.activity({ operationId: `${row.id}:host-restart`, projectId: row.project_id, eventType: 'REQUEST_RUN_RECOVERED', actor: { type: 'agent', id: row.agent_id }, objectRef: row.id, summary: 'Interrupted collaboration Request Run marked UNKNOWN; Request returned to explicit handling without automatic replay', at });
+      });
+    }
+    return rows.length;
   }
 
   recoverInterruptedReviewRuns() {
@@ -215,6 +249,7 @@ export class CollaborationGovernance {
   }
 
   createRequest({ project, task, resultId, fromAgent, proposal }) {
+    if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'collaboration Requests require an ACTIVE project', 409);
     if (!fromAgent.permissions.includes('request:create')) throw new ControlPlaneError('FORBIDDEN', 'Agent lacks request:create', 403);
     if (task.status !== 'WAITING') throw new ControlPlaneError('REQUEST_SOURCE_NOT_WAITING', 'Request may only be created at a NEEDS_INPUT terminal boundary', 409);
     const sourceResult = this.store.getResult(resultId);
@@ -308,6 +343,11 @@ export class CollaborationGovernance {
     if (!request) throw new ControlPlaneError('REQUEST_NOT_FOUND', 'Request does not exist', 404);
     if (!['PENDING', 'IN_PROGRESS'].includes(request.status)) throw new ControlPlaneError('REQUEST_NOT_OPEN', 'Request is no longer open', 409);
     const project = this.controlPlane.requireProject(request.projectId);
+    const task = this.store.getTask(request.sourceTaskId);
+    if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'Request responses require an ACTIVE project', 409);
+    if (!task || task.status !== 'WAITING' || task.waiting?.onRef !== request.id) {
+      throw new ControlPlaneError('REQUEST_SOURCE_NOT_WAITING', 'Request source Task is no longer waiting on this Request', 409);
+    }
     const actor = requireActor(input.actor);
     if (!['agent', 'pl'].includes(actor.type) || actor.id !== request.toAgentId) throw new ControlPlaneError('FORBIDDEN', 'only the addressed Agent may respond', 403);
     const recipient = this.controlPlane.requireProjectAgent(project, request.toAgentId);
@@ -319,7 +359,6 @@ export class CollaborationGovernance {
     const operationId = this.controlPlane.assertNewOperation(input.operationId);
     const responseId = id('RESPONSE');
     const at = now();
-    const task = this.store.getTask(request.sourceTaskId);
     this.store.transaction(() => {
       this.store.db.prepare(`INSERT INTO responses(id, request_id, from_agent_id, outcome, body, evidence_refs_json, created_at)
         VALUES(?, ?, ?, ?, ?, ?, ?)`).run(responseId, request.id, recipient.id, outcome, body, json(evidenceRefs), at);
@@ -338,6 +377,11 @@ export class CollaborationGovernance {
     for (const row of rows) {
       const request = this.store.getRequest(row.id);
       const task = this.store.getTask(request.sourceTaskId);
+      const project = this.store.getProject(request.projectId);
+      if (project?.status !== 'ACTIVE' || task?.status !== 'WAITING' || task.waiting?.onRef !== request.id) {
+        this.store.db.prepare("UPDATE requests SET status='REJECTED', resolved_at=? WHERE id=? AND status IN ('PENDING','IN_PROGRESS')").run(at, request.id);
+        continue;
+      }
       const responseId = id('RESPONSE');
       this.store.transaction(() => {
         this.store.db.prepare(`INSERT INTO responses(id, request_id, from_agent_id, outcome, body, evidence_refs_json, created_at)

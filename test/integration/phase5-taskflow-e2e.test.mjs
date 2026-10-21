@@ -194,6 +194,76 @@ test('TaskFlow §13 DAG completes NEEDS_INPUT handoff, AUTO/PL/REVIEWER_PL revie
     assert.equal(state.selected.agents.filter((agent) => agent.status !== 'REPLACED').every((agent) => agent.status === 'UNAVAILABLE'), true);
     assert.equal(state.selected.activities.some((item) => item.eventType === 'PROJECT_STOPPED'), true);
     assert.equal(state.selected.activities.some((item) => /password|api[_-]?key|BEGIN PRIVATE KEY/i.test(item.summary)), false);
+
+    const stoppedTaskStates = state.selected.tasks.map((item) => [item.id, item.status]);
+    state = fx.plane.resumeProject({ actor: OWNER, operationId: operation('resume'), projectId: fx.projectId, expectedVersion: state.selected.project.version });
+    assert.equal(state.selected.project.status, 'ACTIVE');
+    assert.deepEqual(state.selected.tasks.map((item) => [item.id, item.status]), stoppedTaskStates);
+    assert.equal(state.selected.agents.filter((agent) => agent.status !== 'REPLACED').every((agent) => agent.status === 'IDLE'), true);
+    assert.equal(state.selected.agents.filter((agent) => agent.status === 'REPLACED').length, 1);
+    assert.equal(state.selected.activities.some((item) => item.eventType === 'PROJECT_RESUMED'), true);
+
+    state = fx.plane.createTask({
+      actor: { type: 'pl', id: state.selected.project.leadAgentId }, operationId: operation('resumed-task'),
+      projectId: fx.projectId, expectedProjectVersion: state.selected.project.version,
+      title: 'Post-resume follow-up', goal: 'Prove resumed Projects accept new work.',
+      scope: { allowed: ['docs/**'], forbidden: [] }, acceptance: ['Task exists after resume'], dependencies: [],
+      controlLevel: 'IMPORTANT', reviewPolicy: 'PL',
+    });
+    const followUpId = state.selected.tasks.at(-1).id;
+    state = fx.plane.stopProject({ actor: OWNER, operationId: operation('stop-again'), projectId: fx.projectId, expectedVersion: state.selected.project.version, reason: 'Exercise retained cancellation history' });
+    assert.equal(state.selected.tasks.find((item) => item.id === followUpId).status, 'CANCELLED');
+    state = fx.plane.resumeProject({ actor: OWNER, operationId: operation('resume-again'), projectId: fx.projectId, expectedVersion: state.selected.project.version });
+    assert.equal(state.selected.tasks.find((item) => item.id === followUpId).status, 'CANCELLED');
+    for (const planCheck of state.selected.planChecks.filter((item) => item.status === 'PENDING')) {
+      fx.governance.completePlanCheck({
+        actor: { type: 'pl', id: state.selected.project.leadAgentId }, operationId: operation('post-resume-plan-check'),
+        planCheckId: planCheck.id, decision: 'KEEP_PLAN', notes: 'Cancelled historical Task is outside the active completion scope.',
+      });
+    }
+    state = fx.store.snapshot(fx.projectId);
+    state = fx.plane.completeProject({ actor: OWNER, operationId: operation('complete-after-resume'), projectId: fx.projectId, expectedVersion: state.selected.project.version });
+    assert.equal(state.selected.project.status, 'COMPLETED');
+    assert.equal(state.selected.activities.some((item) => item.eventType === 'PROJECT_COMPLETED'), true);
+  } finally {
+    await fx.governance.close();
+    await fx.coordinator.close();
+    fx.store.close();
+    rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test('stopping a WAITING Task rejects its open Request and resume never revives the cancelled Task', async () => {
+  const fx = await fixture([needsInput('PLACEHOLDER')]);
+  try {
+    const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER');
+    fx.adapters.outputs[0] = needsInput(reviewer.id);
+    const task = createTask(fx, 'Wait for an external decision', [], 'IMPORTANT', 'PL', ['src/contract.js']);
+    assignAndStart(fx, task);
+    const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'open Request before stop');
+    await waitFor(() => fx.store.getTask(task.id).status === 'WAITING', 'source Task waiting');
+
+    let state = fx.store.snapshot(fx.projectId);
+    state = fx.plane.stopProject({
+      actor: OWNER, operationId: operation('stop-with-request'), projectId: fx.projectId,
+      expectedVersion: state.selected.project.version, reason: 'Close the Project with a queued Request',
+    });
+    assert.equal(state.selected.project.status, 'STOPPED');
+    assert.equal(state.selected.tasks.find((item) => item.id === task.id).status, 'CANCELLED');
+    assert.equal(state.selected.requests.find((item) => item.id === request.id).status, 'REJECTED');
+
+    state = fx.plane.resumeProject({
+      actor: OWNER, operationId: operation('resume-with-rejected-request'), projectId: fx.projectId,
+      expectedVersion: state.selected.project.version,
+    });
+    assert.equal(state.selected.project.status, 'ACTIVE');
+    assert.equal(state.selected.tasks.find((item) => item.id === task.id).status, 'CANCELLED');
+    assert.equal(state.selected.requests.find((item) => item.id === request.id).status, 'REJECTED');
+    assert.throws(() => fx.governance.respondRequest({
+      actor: { type: 'agent', id: reviewer.id }, operationId: operation('late-response'),
+      requestId: request.id, outcome: 'ANSWER', body: 'Too late', evidenceRefs: [],
+    }), (error) => error.code === 'REQUEST_NOT_OPEN');
+    assert.equal(fx.store.getTask(task.id).status, 'CANCELLED');
   } finally {
     await fx.governance.close();
     await fx.coordinator.close();
@@ -214,6 +284,13 @@ test('Phase 5 client exposes all six Host-backed views without credential or cha
   assert.doesNotMatch(source, /position:\s*'fixed'/);
   assert.match(source, /request-review/);
   assert.match(source, /complete-project/);
+  assert.match(source, /resume-project/);
+  assert.match(source, /project-maxAgents/);
+  assert.match(source, /setCreateMode\(\(value\) => !value\)/);
+  assert.match(source, /收起创建表单/);
+  assert.match(source, /task-read-only/);
+  assert.match(source, /不是大模型名称/);
+  assert.match(source, /ACTIVITY_LABELS/);
   assert.doesNotMatch(source, /Reviewer 通过|Reviewer 退回/);
   assert.match(source, /ctx\.uiWorkspace\.openWorkspace\(/);
   assert.match(source, /requestDraftInitialization\(/);
