@@ -101,6 +101,7 @@ window.__ModuleLoader__.load({
       TASK_AUTO_VERIFIED: '自动验收任务', REVIEW_APPROVE: '审核通过', REVIEW_REJECT: '审核退回', REVIEW_RUN_CREATED: '创建独立审核',
       REVIEW_RUN_TERMINAL: '独立审核结束', REVIEW_RUN_FAILED: '独立审核失败', REVIEW_RUN_RECOVERED: '恢复异常审核记录',
       FINDING_OPENED: '记录问题', FINDING_TRIAGED: '更新问题状态', PLAN_CHECK_COMPLETED: '完成计划检查', DECISION_APPROVED: '记录已批准决策',
+      PL_SESSION_BOUND: '绑定 PL 会话', VERIFICATION_COMMAND_APPROVED: '批准验证命令', VERIFICATION_COMMAND_REVOKED: '撤销验证命令',
     });
     const ACTIVITY_DESCRIPTIONS = Object.freeze({
       PROJECT_CREATED: '项目已经建立，并进入需求访谈阶段。', PROJECT_STOPPED: '项目已由负责人停止；未完成任务保留为审计记录。',
@@ -120,6 +121,9 @@ window.__ModuleLoader__.load({
       FINDING_OPENED: '审核过程中发现的问题已记录。', FINDING_TRIAGED: '问题状态已经更新。', PLAN_CHECK_COMPLETED: '阶段性计划检查已完成。',
       DECISION_APPROVED: '一项已批准的项目决策已写入审计记录。', RUNTIMES_SCANNED: 'Host 已重新扫描可用模型来源和 Worker 运行方式。',
       RUNTIME_AUTHORIZED: '负责人已允许控制面使用该运行环境。', RUNTIME_REVOKED: '负责人已撤销该运行环境的使用授权。',
+      PL_SESSION_BOUND: '负责人已把项目绑定到指定的 PL 会话；只有该会话中的 PL 可以调用 agent_team_* 工具。',
+      VERIFICATION_COMMAND_APPROVED: '负责人批准了一条验证命令；PL 只能引用该命令 ID，不能提交任意命令文本。',
+      VERIFICATION_COMMAND_REVOKED: '负责人已撤销该验证命令；后续运行不能再引用它。',
     });
 
     function projectStatusLabel(status) { return PROJECT_STATUS_LABELS[status] || status; }
@@ -363,7 +367,9 @@ window.__ModuleLoader__.load({
       const results = selected.results || [];
       const evidence = selected.evidence || [];
       const workers = selected.agents.filter((agent) => agent.role === 'WORKER' && agent.status === 'IDLE' && !agent.currentTaskId);
-      const [verificationCommand, setVerificationCommand] = React.useState('');
+      const approvedCommands = (selected.verificationCommands || []).filter((command) => command.status === 'APPROVED');
+      const [commandForm, setCommandForm] = React.useState({ displayName: '', command: '' });
+      const [commandByTask, setCommandByTask] = React.useState({});
       const [assigneeByTask, setAssigneeByTask] = React.useState({});
       const [form, setForm] = React.useState({
         title: '', goal: '', allowed: '', forbidden: '', acceptance: '', dependencies: '',
@@ -407,6 +413,34 @@ window.__ModuleLoader__.load({
               controlLevel: form.controlLevel, reviewPolicy: form.reviewPolicy,
             }),
           }, 'PL 创建正式 Task')),
+        !readOnly && h('div', { style: styles.card, 'data-testid': 'verification-command-form' },
+          h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+            h('strong', null, `验证命令白名单 · ${approvedCommands.length}（Human 批准）`)),
+          h('div', { style: { ...styles.muted, marginTop: 4 } }, 'Worker 运行只能引用此处已批准的 PowerShell 命令 ID；PL 无法提交任意命令文本，新命令必须由负责人批准。'),
+          h('label', null, '命令名称（用于展示，可空）', h('input', {
+            style: styles.input, value: commandForm.displayName, 'data-testid': 'verification-command-name',
+            onChange: (event) => setCommandForm({ ...commandForm, displayName: event.target.value }),
+          })),
+          h('label', null, 'PowerShell 命令（负责人批准后写入白名单）', h('textarea', {
+            style: styles.input, value: commandForm.command, 'data-testid': 'verification-command-text',
+            onChange: (event) => setCommandForm({ ...commandForm, command: event.target.value }),
+          })),
+          h(Button, {
+            disabled: busy || !commandForm.command.trim(),
+            'data-testid': 'approve-verification-command',
+            onClick: () => act('approve-verification-command', {
+              projectId: selected.project.id,
+              displayName: commandForm.displayName.trim() || commandForm.command.trim().slice(0, 60),
+              command: commandForm.command.trim(), timeoutMs: 120000,
+            }).then(() => setCommandForm({ displayName: '', command: '' })),
+          }, 'Human 批准命令'),
+          approvedCommands.map((command) => h('div', { key: command.id, style: { ...styles.row, marginTop: 7 } },
+            h('span', { style: styles.tag }, command.id),
+            h('span', { style: { ...styles.muted, flex: 1, overflowWrap: 'anywhere' } }, `${command.displayName} · ${command.command}`),
+            h(Button, {
+              disabled: busy, 'data-testid': `revoke-verification-command-${command.id}`,
+              onClick: () => act('revoke-verification-command', { projectId: selected.project.id, commandId: command.id }),
+            }, '撤销')))),
         tasks.map((task) => h('div', { key: task.id, style: styles.card, 'data-testid': 'task-record', 'data-task-id': task.id },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
             h('b', null, task.title), h('span', { style: styles.tag }, taskStatusLabel(task.status))),
@@ -436,19 +470,22 @@ window.__ModuleLoader__.load({
               taskId: task.id, expectedVersion: task.version,
             }),
           }, '释放指派（未启动）'),
-          !readOnly && task.status === 'READY' && task.assignedAgentId && h('div', { style: { marginTop: 7 } },
-            h('input', {
-              style: styles.input, value: verificationCommand,
-              placeholder: 'Host 独立验证 PowerShell 命令（留空将得到 PARTIAL）',
-              'data-testid': 'run-verification-command',
-              onChange: (event) => setVerificationCommand(event.target.value),
-            }),
+          !readOnly && task.status === 'READY' && task.assignedAgentId && h('div', { style: { marginTop: 7 }, 'data-testid': `run-commands-${task.id}` },
+            approvedCommands.length > 0
+              ? h('select', {
+                  style: { ...styles.input, margin: 0 },
+                  value: commandByTask[task.id] || '',
+                  'data-testid': `run-verification-commands-${task.id}`,
+                  onChange: (event) => setCommandByTask({ ...commandByTask, [task.id]: event.target.value }),
+                }, [h('option', { key: '', value: '' }, '不使用验证命令（结果将始终为 PARTIAL）')]
+                  .concat(approvedCommands.map((command) => h('option', { key: command.id, value: command.id }, `${command.displayName} · ${command.id}`))))
+              : h('div', { style: styles.muted }, '尚无已批准验证命令；本次运行结果将始终为 PARTIAL。'),
             h(Button, {
               disabled: busy, 'data-testid': `start-run-${task.id}`,
               onClick: () => act('start-task-run', {
                 actor: { type: 'pl', id: selected.project.leadAgentId }, projectId: selected.project.id,
                 taskId: task.id, expectedVersion: task.version,
-                verificationCommands: verificationCommand.trim() ? [{ command: verificationCommand.trim() }] : [],
+                verification_command_ids: commandByTask[task.id] ? [commandByTask[task.id]] : [],
                 writeIntent: true,
               }),
             }, '启动一次性 Worker Run')))),
@@ -792,6 +829,14 @@ window.__ModuleLoader__.load({
             });
             if (result === 'blocked') throw new Error('新 PL 会话输入区正忙，请稍后重试');
             ctx.conversation.input.for(binding.ctx).submit();
+            // R1: persist the Project ↔ PL Session binding so agent_team_* tools
+            // can authorize this exact Session. This is a Human (owner) action.
+            request('bind-project-pl-session', {
+              projectId: project.id,
+              plSessionId: sessionId,
+            }).catch((error) => {
+              console.error(`PL Session 绑定失败（agent_team_* 工具将被拒绝）: ${error.message}`);
+            });
           }, { agentPreset: 'standard' });
         };
         ctx.slots.inject('main', () => ctx.slots.register({

@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_ROLE_PERMISSIONS, json, parseJson } from '../shared/contracts.js';
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 function mapProject(row) {
   if (!row) return undefined;
@@ -20,8 +20,24 @@ function mapProject(row) {
     replanEveryN: row.replan_every_n,
     status: row.status,
     version: row.version,
+    plSessionId: row.pl_session_id ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapVerificationCommand(row) {
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    displayName: row.display_name,
+    command: row.command,
+    timeoutMs: row.timeout_ms,
+    status: row.status,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    approvedAt: row.approved_at,
   };
 }
 
@@ -636,13 +652,34 @@ export class ControlPlaneStore {
         created_at TEXT NOT NULL,
         approved_at TEXT
       );
+      CREATE TABLE IF NOT EXISTS verification_commands (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        display_name TEXT NOT NULL,
+        command TEXT NOT NULL,
+        timeout_ms INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('APPROVED','REVOKED')),
+        created_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        approved_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS verification_commands_by_project
+        ON verification_commands(project_id, status);
     `);
+    const projectColumns = new Set(this.db.prepare('PRAGMA table_info(projects)').all().map((column) => column.name));
+    if (!projectColumns.has('pl_session_id')) {
+      this.db.exec('ALTER TABLE projects ADD COLUMN pl_session_id TEXT');
+    }
+    // R1.3: migrations must never re-expand permissions that were previously
+    // narrowed. Prune any permission outside the frozen role template; never
+    // merge defaults back into existing records.
     const permissionRows = this.db.prepare("SELECT id, role, permissions_json FROM agents WHERE role IN ('PROJECT_LEAD', 'WORKER', 'REVIEWER')").all();
     const updatePermissions = this.db.prepare('UPDATE agents SET permissions_json=? WHERE id=?');
     for (const row of permissionRows) {
       const permissions = parseJson(row.permissions_json, []);
-      const merged = [...new Set([...permissions, ...(DEFAULT_ROLE_PERMISSIONS[row.role] ?? [])])];
-      if (merged.length !== permissions.length) updatePermissions.run(json(merged), row.id);
+      const template = new Set(DEFAULT_ROLE_PERMISSIONS[row.role] ?? []);
+      const pruned = permissions.filter((permission) => template.has(permission));
+      if (pruned.length !== permissions.length) updatePermissions.run(json(pruned), row.id);
     }
     this.db.prepare(`INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run(String(SCHEMA_VERSION));
   }
@@ -665,6 +702,31 @@ export class ControlPlaneStore {
 
   getProject(projectId) {
     return mapProject(this.db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId));
+  }
+
+  setProjectPlSession(projectId, plSessionId, at) {
+    this.db.prepare('UPDATE projects SET pl_session_id=?, updated_at=? WHERE id=?').run(plSessionId, at, projectId);
+  }
+
+  listVerificationCommands(projectId) {
+    return this.db.prepare('SELECT * FROM verification_commands WHERE project_id=? ORDER BY created_at, id').all(projectId).map(mapVerificationCommand);
+  }
+
+  getVerificationCommand(projectId, commandId) {
+    return mapVerificationCommand(this.db.prepare('SELECT * FROM verification_commands WHERE project_id=? AND id=?').get(projectId, commandId));
+  }
+
+  insertVerificationCommand(record) {
+    this.db.prepare(`INSERT INTO verification_commands(
+      id, project_id, display_name, command, timeout_ms, status, created_by, created_at, approved_at
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      record.id, record.projectId, record.displayName, record.command, record.timeoutMs,
+      record.status, record.createdBy, record.createdAt, record.approvedAt ?? null,
+    );
+  }
+
+  setVerificationCommandStatus(commandId, status, at) {
+    this.db.prepare('UPDATE verification_commands SET status=?, approved_at=? WHERE id=?').run(status, at, commandId);
   }
 
   listProjects() {
@@ -945,6 +1007,7 @@ export class ControlPlaneStore {
         findings: this.listFindings(selected.id),
         planChecks: this.listPlanChecks(selected.id),
         decisions: this.listDecisions(selected.id),
+        verificationCommands: this.listVerificationCommands(selected.id),
       } : null,
     };
   }

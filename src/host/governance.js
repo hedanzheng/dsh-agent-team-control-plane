@@ -1,4 +1,4 @@
-import { ControlPlaneError, id, json, now, requireActor, requireString, requireStringArray } from '../shared/contracts.js';
+import { CHARTER_IMPACT, ControlPlaneError, id, json, now, requireActor, requireString, requireStringArray } from '../shared/contracts.js';
 
 function actorKey(actor) { return `${actor.type}:${actor.id}`; }
 
@@ -636,6 +636,13 @@ export class CollaborationGovernance {
     const project = this.controlPlane.requireProject(input.projectId);
     const actor = requireActor(input.actor);
     if (!((actor.type === 'pl' && actor.id === project.leadAgentId) || (actor.type === 'human' && actor.id === project.ownerId))) throw new ControlPlaneError('FORBIDDEN', 'Only Human/PL may approve project Decisions', 403);
+    // R1.3: a Decision that changes Mission, Scope, or non-negotiable Charter
+    // constraints is a Human-only major change. A PL recordDecision with any
+    // declared Charter impact is rejected instead of auto-taking effect.
+    const charterImpact = enumValue(input.charterImpact ?? 'NONE', 'charterImpact', CHARTER_IMPACT);
+    if (charterImpact !== 'NONE' && actor.type !== 'human') {
+      throw new ControlPlaneError('CHARTER_CHANGE_REQUIRES_HUMAN', 'Decisions affecting Mission/Scope/non-negotiable constraints require the Human Owner', 403);
+    }
     const operationId = this.controlPlane.assertNewOperation(input.operationId);
     const decisionId = id('DECISION');
     const at = now();

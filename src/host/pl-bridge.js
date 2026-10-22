@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { ControlPlaneError } from '../shared/contracts.js';
 
 const STRING_OUTPUT = Object.freeze({
   schema: { type: 'string' },
@@ -7,6 +8,35 @@ const STRING_OUTPUT = Object.freeze({
 
 function operationId(action) {
   return `pl-tool:${action}:${randomUUID()}`;
+}
+
+// R1.2: every `agent_team_*` call must prove it comes from the exact live Agent
+// Session that the Human bound to this Project as its PL. Ordinary sessions,
+// other projects' PL sessions, stale bindings, and missing agents are rejected
+// before any parent binding or other side effect is created.
+function authorizePlSession({ controlPlane, store, adapters }, projectId, exec) {
+  const agent = exec?.agent;
+  if (!agent || typeof agent.id !== 'string' || !agent.id) {
+    throw new ControlPlaneError('PL_AGENT_REQUIRED', 'agent_team_* tools require a live executing Agent context', 401);
+  }
+  if (!adapters.isLiveParent(agent)) {
+    throw new ControlPlaneError('PL_AGENT_NOT_LIVE', 'executing Agent is not registered in the live Host Agent registry', 401);
+  }
+  const project = controlPlane.requireProject(projectId);
+  if (!project.plSessionId) {
+    throw new ControlPlaneError('PL_SESSION_NOT_BOUND', 'Project has no bound PL Session; the Human Owner must bind it in the control console first', 403);
+  }
+  if (agent.id !== project.plSessionId) {
+    throw new ControlPlaneError('PL_SESSION_MISMATCH', 'this Agent Session is not the PL Session bound to this Project', 403);
+  }
+  const plRecord = store.listAgents(project.id).find((item) => item.id === project.leadAgentId);
+  if (!plRecord || plRecord.role !== 'PROJECT_LEAD') {
+    throw new ControlPlaneError('PL_AGENT_REPLACED', 'the Project Lead record is missing from this Project', 403);
+  }
+  if (plRecord.status === 'REPLACED') {
+    throw new ControlPlaneError('PL_AGENT_REPLACED', 'this Project Lead was replaced; the bound Session is no longer authorized', 403);
+  }
+  return project;
 }
 
 function defineBridgeTool(options) {
@@ -57,13 +87,16 @@ function projectFor(controlPlane, projectId) {
   return controlPlane.requireProject(projectId);
 }
 
-function projectTool({ name, description, parameters, execute, bindParent }) {
+function projectTool({ name, description, parameters, execute, bindParent, services }) {
   return defineBridgeTool({
     name,
     description,
     parameters,
     output: STRING_OUTPUT,
     async execute(args, exec) {
+      // Authorization must succeed before any parent binding or business call;
+      // a rejected call leaves no side effect.
+      authorizePlSession(services, args.project_id, exec);
       if (args.project_id && exec?.agent) bindParent?.(args.project_id, exec.agent);
       const snapshot = await execute(args, exec);
       return renderState(snapshot);
@@ -73,6 +106,7 @@ function projectTool({ name, description, parameters, execute, bindParent }) {
 
 export function createPLBridgeTools({ controlPlane, coordinator, governance, store, adapters }) {
   const bindParent = (projectId, parent) => adapters?.bindProjectParent(projectId, parent);
+  const services = { controlPlane, coordinator, governance, store, adapters };
   return [
     projectTool({
       name: 'agent_team_project_state',
@@ -81,13 +115,14 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         project_id: { type: 'string', required: true, description: 'Project ID from the PL conversation bootstrap prompt.' },
       },
       bindParent,
+      services,
       execute(args) {
         return controlPlane.snapshot(args.project_id);
       },
     }),
     projectTool({
       name: 'agent_team_record_interview',
-      description: 'Record answers that the Human explicitly supplied in this PL conversation and create the Charter draft. This does not approve the Charter. After calling it, direct the Human to approve the pending Charter in the Agent Team control console.',
+      description: 'Record the interview answers you collected from the Human in this PL conversation and create the Charter draft. This records a PL proposal only: it never approves the Charter and never fabricates a Human confirmation. After calling it, direct the Human to approve the pending Charter in the Agent Team control console.',
       parameters: {
         project_id: { type: 'string', required: true },
         scope_allowed: { type: 'array', required: true, items: { type: 'string' } },
@@ -96,10 +131,11 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         success_criteria: { type: 'array', required: true, items: { type: 'string' } },
       },
       bindParent,
+      services,
       execute(args) {
         const project = projectFor(controlPlane, args.project_id);
         return controlPlane.answerInterview({
-          actor: { type: 'human', id: project.ownerId },
+          actor: { type: 'pl', id: project.leadAgentId },
           operationId: operationId('record-interview'),
           projectId: project.id,
           expectedVersion: project.version,
@@ -127,6 +163,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         review_policy: { type: 'string', enum: ['AUTO', 'PL', 'REVIEWER_PL'] },
       },
       bindParent,
+      services,
       execute(args) {
         const project = projectFor(controlPlane, args.project_id);
         return controlPlane.createTask({
@@ -153,6 +190,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         worker_agent_id: { type: 'string' },
       },
       bindParent,
+      services,
       execute(args) {
         const project = projectFor(controlPlane, args.project_id);
         const task = controlPlane.requireTask(project, args.task_id);
@@ -172,24 +210,28 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
     }),
     projectTool({
       name: 'agent_team_start_task_run',
-      description: 'Start the assigned READY Task as a one-shot Worker Run. The Worker, Host verification, Result, and evidence remain authoritative; wait and re-read project state instead of editing files in the PL conversation.',
+      description: 'Start the assigned READY Task as a one-shot Worker Run. Verification commands must already be Human-approved in this Project; pass only their command IDs (see agent_team_project_state verificationCommands). The Worker, Host verification, Result, and evidence remain authoritative; wait and re-read project state instead of editing files in the PL conversation.',
       parameters: {
         project_id: { type: 'string', required: true },
         task_id: { type: 'string', required: true },
-        verification_commands: { type: 'array', items: { type: 'string' }, description: 'PowerShell verification commands for independent Host execution.' },
+        verification_command_ids: { type: 'array', items: { type: 'string' }, description: 'IDs of Human-approved project verification commands to execute on the Host.' },
         write_intent: { type: 'boolean' },
       },
       bindParent,
+      services,
       async execute(args, exec) {
         const project = projectFor(controlPlane, args.project_id);
         const task = controlPlane.requireTask(project, args.task_id);
+        if (args.verification_commands !== undefined) {
+          throw new ControlPlaneError('VERIFICATION_COMMANDS_REJECTED', 'free-text verification commands are not accepted; select approved verification_command_ids', 400);
+        }
         return coordinator.startTaskRun({
           actor: { type: 'pl', id: project.leadAgentId },
           operationId: operationId('start-task-run'),
           projectId: project.id,
           taskId: task.id,
           expectedVersion: task.version,
-          verificationCommands: (args.verification_commands ?? []).map((command) => ({ command })),
+          verificationCommands: controlPlane.resolveVerificationCommands(project.id, args.verification_command_ids),
           writeIntent: args.write_intent ?? true,
           signal: exec?.signal,
           parentAgent: exec?.agent,
@@ -204,6 +246,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         task_id: { type: 'string', required: true },
       },
       bindParent,
+      services,
       execute(args, exec) {
         const project = projectFor(controlPlane, args.project_id);
         return governance.requestIndependentReview({
@@ -224,6 +267,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         issues: { type: 'array', items: { type: 'string' } },
       },
       bindParent,
+      services,
       execute(args) {
         const project = projectFor(controlPlane, args.project_id);
         const task = controlPlane.requireTask(project, args.task_id);
@@ -251,7 +295,7 @@ export function installPLBridge(ctx, services) {
   register(ctx.systemPrompt.section({
     name: 'agent-team-control-plane:pl-policy',
     order: ctx.systemPrompt.getSectionOrder('TEAM_POLICY'),
-    text: `When a conversation bootstrap identifies you as an Agent Team Control Plane Project Lead, the Control Plane is the source of truth. Call agent_team_project_state before describing status. Record Human interview answers with agent_team_record_interview, then wait for Human approval in the control console. Create, assign, and start formal work only with agent_team_* tools. For REVIEWER_PL Tasks, call agent_team_request_review and wait for the independent Reviewer decision before calling agent_team_review_task. Do not edit project files or run implementation commands from the PL conversation. Do not claim a Charter, Task, Run, review, or completion exists unless the latest tool result contains it.`,
+    text: `When a conversation bootstrap identifies you as an Agent Team Control Plane Project Lead, the Control Plane is the source of truth. These tools only work from the PL Session the Human bound to this Project. Call agent_team_project_state before describing status. Record the interview answers you collected with agent_team_record_interview as a PL proposal, then wait for Human approval in the control console. Create, assign, and start formal work only with agent_team_* tools; verification commands must be Human-approved IDs, not free text. For REVIEWER_PL Tasks, call agent_team_request_review and wait for the independent Reviewer decision before calling agent_team_review_task. Do not edit project files or run implementation commands from the PL conversation. Do not claim a Charter, Task, Run, review, or completion exists unless the latest tool result contains it.`,
   }));
   return () => {
     for (const dispose of disposers.reverse()) dispose();

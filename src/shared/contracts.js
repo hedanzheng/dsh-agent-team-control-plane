@@ -18,6 +18,8 @@ export const TASK_STATUS = Object.freeze([
 ]);
 export const CONTROL_LEVEL = Object.freeze(['ROUTINE', 'IMPORTANT', 'CRITICAL']);
 export const REVIEW_POLICY = Object.freeze(['AUTO', 'PL', 'REVIEWER_PL']);
+export const CHARTER_IMPACT = Object.freeze(['NONE', 'MISSION', 'SCOPE', 'CONSTRAINTS']);
+export const VERIFICATION_COMMAND_STATUS = Object.freeze(['APPROVED', 'REVOKED']);
 export const TASK_PROPOSAL_STATUS = Object.freeze(['PENDING', 'ACCEPTED', 'REJECTED']);
 export const TASK_RUN_STATUS = Object.freeze([
   'CREATED', 'STARTING', 'RUNNING', 'SUCCEEDED', 'NEEDS_INPUT', 'PARTIAL',

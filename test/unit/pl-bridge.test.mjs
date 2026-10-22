@@ -6,6 +6,7 @@ const project = {
   id: 'PROJECT-1',
   ownerId: 'human-owner',
   leadAgentId: 'AGENT-PL-1',
+  plSessionId: 'SESSION-PL-1',
   version: 4,
 };
 
@@ -26,23 +27,31 @@ function snapshot(extra = {}) {
       findings: [],
       planChecks: [],
       activities: [],
+      verificationCommands: [],
       ...extra,
     },
   };
 }
 
-function fixture() {
+function fixture(overrides = {}) {
   const calls = [];
   const state = snapshot();
-  const parentAgent = { id: 'SESSION-PL-1' };
+  const parentAgent = { id: project.plSessionId };
+  const liveAgents = new Set();
+  const projectRecord = overrides.project ?? { ...project };
+  const plStatus = overrides.plStatus ?? 'IDLE';
   const controlPlane = {
-    requireProject(id) { assert.equal(id, project.id); return project; },
+    requireProject(id) { return projectRecord; },
     requireTask(_project, id) { return { id, version: 2, resultId: 'RESULT-1' }; },
     requireProjectAgent(_project, id) { return { id, role: 'WORKER', status: 'IDLE' }; },
     snapshot(id) { calls.push(['snapshot', id]); return state; },
     answerInterview(input) { calls.push(['answerInterview', input]); return state; },
     createTask(input) { calls.push(['createTask', input]); return state; },
     assignTask(input) { calls.push(['assignTask', input]); return state; },
+    resolveVerificationCommands(projectId, commandIds) {
+      calls.push(['resolveVerificationCommands', { projectId, commandIds }]);
+      return commandIds.map((commandId) => ({ command: `approved:${commandId}`, timeoutMs: 120000 }));
+    },
   };
   const coordinator = {
     startTaskRun(input) { calls.push(['startTaskRun', input]); return state; },
@@ -52,16 +61,22 @@ function fixture() {
     requestIndependentReview(input) { calls.push(['requestIndependentReview', input]); return state; },
   };
   const store = {
-    listAgents() { return [{ id: 'AGENT-WORKER-1', role: 'WORKER', status: 'IDLE', currentTaskId: null }]; },
+    listAgents() {
+      return [
+        { id: project.leadAgentId, role: 'PROJECT_LEAD', status: plStatus, currentTaskId: null },
+        { id: 'AGENT-WORKER-1', role: 'WORKER', status: 'IDLE', currentTaskId: null },
+      ];
+    },
     getResult() { return { id: 'RESULT-1', evidenceRefs: ['EVIDENCE-1'] }; },
   };
   const adapters = {
+    isLiveParent(agent) { return agent === parentAgent || liveAgents.has(agent); },
     bindProjectParent(projectId, parent) { calls.push(['bindProjectParent', { projectId, parent }]); },
   };
   const tools = createPLBridgeTools({
     controlPlane, coordinator, governance, store, adapters,
   });
-  return { calls, tools, parentAgent };
+  return { calls, tools, parentAgent, project: projectRecord, liveAgents };
 }
 
 function named(tools, name) {
@@ -84,17 +99,19 @@ test('PL bridge exposes state and workflow tools without Human approval actions'
   assert.equal(tools.some((item) => /approve|stop_project/.test(item.name)), false);
 });
 
-test('record interview binds explicit answers to the Human owner and current version', async () => {
-  const { calls, tools } = fixture();
+test('record interview submits a PL proposal with the assigned PL identity, not a Human actor', async () => {
+  const { calls, tools, parentAgent } = fixture();
   const value = await named(tools, 'agent_team_record_interview').execute({
     project_id: project.id,
     scope_allowed: ['src'],
     constraints: ['zero dependencies'],
     success_criteria: ['npm test passes'],
-  });
+  }, { agent: parentAgent });
   assert.equal(JSON.parse(value).project.id, project.id);
   const input = calls.find(([name]) => name === 'answerInterview')[1];
-  assert.deepEqual(input.actor, { type: 'human', id: 'human-owner' });
+  // R1.2: the PL records interview facts as a proposal; the actor is never a
+  // fabricated Human confirmation.
+  assert.deepEqual(input.actor, { type: 'pl', id: 'AGENT-PL-1' });
   assert.equal(input.expectedVersion, 4);
   assert.deepEqual(input.answers.scope_forbidden, []);
   assert.match(input.operationId, /^pl-tool:record-interview:/);
@@ -102,33 +119,50 @@ test('record interview binds explicit answers to the Human owner and current ver
 
 test('formal Task operations always use the assigned PL identity', async () => {
   const { calls, tools, parentAgent } = fixture();
+  const exec = { signal: new AbortController().signal, agent: parentAgent };
   await named(tools, 'agent_team_create_task').execute({
     project_id: project.id,
     title: 'T1', goal: 'Design', scope_allowed: ['docs/interface.md'],
     acceptance: ['contract written'], dependency_ids: [],
-  });
-  await named(tools, 'agent_team_assign_task').execute({ project_id: project.id, task_id: 'TASK-1' });
+  }, exec);
+  await named(tools, 'agent_team_assign_task').execute({ project_id: project.id, task_id: 'TASK-1' }, exec);
   await named(tools, 'agent_team_start_task_run').execute({
     project_id: project.id,
     task_id: 'TASK-1',
-    verification_commands: ['npm test'],
-  }, { signal: new AbortController().signal, agent: parentAgent });
+    verification_command_ids: ['VCMD-1'],
+  }, exec);
   for (const name of ['createTask', 'assignTask', 'startTaskRun']) {
     const input = calls.find(([called]) => called === name)[1];
     assert.deepEqual(input.actor, { type: 'pl', id: 'AGENT-PL-1' });
   }
-  assert.deepEqual(calls.find(([name]) => name === 'startTaskRun')[1].verificationCommands, [{ command: 'npm test' }]);
+  // R1.4: only Human-approved command IDs are resolved to the whitelist.
+  assert.deepEqual(calls.find(([name]) => name === 'startTaskRun')[1].verificationCommands, [{ command: 'approved:VCMD-1', timeoutMs: 120000 }]);
   assert.equal(calls.find(([name]) => name === 'startTaskRun')[1].parentAgent, parentAgent);
   assert.deepEqual(calls.find(([name]) => name === 'bindProjectParent')[1], { projectId: project.id, parent: parentAgent });
 });
 
+test('free-text verification commands are rejected before any Run starts', async () => {
+  const { calls, tools, parentAgent } = fixture();
+  await assert.rejects(
+    named(tools, 'agent_team_start_task_run').execute({
+      project_id: project.id,
+      task_id: 'TASK-1',
+      verification_commands: [{ command: 'npm test' }],
+    }, { agent: parentAgent }),
+    (error) => error.code === 'VERIFICATION_COMMANDS_REJECTED',
+  );
+  // No command resolution and no Worker Run may be created.
+  assert.equal(calls.some(([name]) => name === 'resolveVerificationCommands'), false);
+  assert.equal(calls.some(([name]) => name === 'startTaskRun'), false);
+});
+
 test('PL review consumes authoritative Result evidence', async () => {
-  const { calls, tools } = fixture();
+  const { calls, tools, parentAgent } = fixture();
   await named(tools, 'agent_team_review_task').execute({
     project_id: project.id,
     task_id: 'TASK-1',
     decision: 'APPROVE',
-  });
+  }, { agent: parentAgent });
   const input = calls.find(([name]) => name === 'submitReview')[1];
   assert.deepEqual(input.evidenceRefs, ['EVIDENCE-1']);
   assert.deepEqual(input.actor, { type: 'pl', id: 'AGENT-PL-1' });
@@ -144,6 +178,76 @@ test('PL can launch a real independent Reviewer Run with the live parent Agent',
   assert.deepEqual(input.actor, { type: 'pl', id: 'AGENT-PL-1' });
   assert.equal(input.parentAgent, parentAgent);
   assert.match(input.operationId, /^pl-tool:request-review:/);
+});
+
+test('missing executing Agent context is rejected without side effects', async () => {
+  const { calls, tools } = fixture();
+  await assert.rejects(
+    named(tools, 'agent_team_create_task').execute({
+      project_id: project.id,
+      title: 'T1', goal: 'Design', scope_allowed: ['src'],
+      acceptance: ['contract'], dependency_ids: [],
+    }),
+    (error) => error.code === 'PL_AGENT_REQUIRED',
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('an Agent that is not in the live Host registry is rejected', async () => {
+  const { tools } = fixture();
+  const unknownAgent = { id: 'SESSION-PL-1', ghost: true };
+  await assert.rejects(
+    named(tools, 'agent_team_project_state').execute({ project_id: project.id }, { agent: unknownAgent }),
+    (error) => error.code === 'PL_AGENT_NOT_LIVE',
+  );
+});
+
+test('an ordinary Session that is not the bound PL Session is rejected', async () => {
+  const { calls, tools, liveAgents } = fixture();
+  const ordinaryAgent = { id: 'SESSION-ORDINARY' };
+  liveAgents.add(ordinaryAgent);
+  await assert.rejects(
+    named(tools, 'agent_team_create_task').execute({
+      project_id: project.id,
+      title: 'T1', goal: 'Design', scope_allowed: ['src'],
+      acceptance: ['contract'], dependency_ids: [],
+    }, { agent: ordinaryAgent }),
+    (error) => error.code === 'PL_SESSION_MISMATCH',
+  );
+  assert.equal(calls.length, 0);
+});
+
+test("another Project's bound PL Session cannot operate this Project", async () => {
+  const { calls, tools, liveAgents } = fixture();
+  const foreignAgent = { id: 'SESSION-OTHER-PROJECT-PL' };
+  liveAgents.add(foreignAgent);
+  await assert.rejects(
+    named(tools, 'agent_team_project_state').execute({ project_id: project.id }, { agent: foreignAgent }),
+    (error) => error.code === 'PL_SESSION_MISMATCH',
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('a Project without a bound PL Session rejects every agent_team_* tool', async () => {
+  const { calls, tools, parentAgent } = fixture({ project: { ...project, plSessionId: null } });
+  await assert.rejects(
+    named(tools, 'agent_team_project_state').execute({ project_id: project.id }, { agent: parentAgent }),
+    (error) => error.code === 'PL_SESSION_NOT_BOUND',
+  );
+  assert.equal(calls.length, 0);
+});
+
+test('a replaced Project Lead Session is rejected and leaves no parent binding', async () => {
+  const { calls, tools, parentAgent } = fixture({ plStatus: 'REPLACED' });
+  await assert.rejects(
+    named(tools, 'agent_team_create_task').execute({
+      project_id: project.id,
+      title: 'T1', goal: 'Design', scope_allowed: ['src'],
+      acceptance: ['contract'], dependency_ids: [],
+    }, { agent: parentAgent }),
+    (error) => error.code === 'PL_AGENT_REPLACED',
+  );
+  assert.equal(calls.length, 0);
 });
 
 test('installation registers policy and disposes every registration', () => {
@@ -169,7 +273,7 @@ test('installation registers policy and disposes every registration', () => {
     coordinator: { startTaskRun: () => snapshot() },
     governance: { submitReview: () => snapshot(), requestIndependentReview: () => snapshot() },
     store: { listAgents: () => [], getResult: () => ({ evidenceRefs: ['EVIDENCE-1'] }) },
-    adapters: { bindProjectParent() {} },
+    adapters: { isLiveParent: () => false, bindProjectParent() {} },
   });
   assert.equal(registered.length, 8);
   dispose();

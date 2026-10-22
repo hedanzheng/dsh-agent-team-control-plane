@@ -204,7 +204,15 @@ export class AgentTeamControlPlane {
 
   answerInterview(input) {
     const project = this.requireProject(input.projectId);
-    const who = this.assertHumanOwner(project, input.actor);
+    const who = requireActor(input.actor);
+    // R1.2: the PL records interview facts as a proposal. Only the Human Owner
+    // recording answers directly counts as Human-supplied facts; a PL recording
+    // marks them as PL-proposed and still requires Human Charter approval.
+    const isHumanOwner = who.type === 'human' && who.id === project.ownerId;
+    const isProjectLead = who.type === 'pl' && who.id === project.leadAgentId;
+    if (!isHumanOwner && !isProjectLead) {
+      throw new ControlPlaneError('FORBIDDEN', 'only the Human Owner or the assigned PL may record interview answers', 403);
+    }
     assertExpectedVersion(project, input.expectedVersion);
     if (project.status !== 'CHARTER_INTERVIEW') throw new ControlPlaneError('INVALID_STATE', 'project is not interviewing', 409);
     const op = this.assertNewOperation(input.operationId);
@@ -220,6 +228,12 @@ export class AgentTeamControlPlane {
     const charterId = id('CHARTER');
     const charterVersion = project.charterVersion + 1;
     const approvalId = id('APPROVAL');
+    const userConfirmed = isHumanOwner
+      ? { initialGoal: project.initialGoal, scopeAllowed, scopeForbidden, constraints, successCriteria }
+      : { initialGoal: project.initialGoal, source: 'pl-proposal-pending-human-approval' };
+    const plAssumptions = isHumanOwner
+      ? ['未明确的实现细节由 PL 在已批准范围内提出方案，不得扩大 Mission 或权限']
+      : ['scope_allowed、scope_forbidden、constraints、success_criteria 由 PL 从对话中整理，尚待 Human 批准'];
     this.store.transaction(() => {
       this.store.db.prepare(`UPDATE project_interviews SET answers_json=?, status='COMPLETED', updated_at=? WHERE project_id=?`).run(json(answers), at, project.id);
       this.store.db.prepare(`INSERT INTO charters(
@@ -228,16 +242,22 @@ export class AgentTeamControlPlane {
       ) VALUES(?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run(
         charterId, project.id, charterVersion, project.initialGoal, json(scopeAllowed), json(scopeForbidden),
         json(constraints), json(successCriteria),
-        json({ initialGoal: project.initialGoal, scopeAllowed, scopeForbidden, constraints, successCriteria }),
-        json(['未明确的实现细节由 PL 在已批准范围内提出方案，不得扩大 Mission 或权限']),
+        json(userConfirmed),
+        json(plAssumptions),
         at,
       );
       this.store.db.prepare(`INSERT INTO approvals(id, project_id, kind, status, payload_json, requested_by, created_at)
         VALUES(?, ?, 'CHARTER', 'PENDING', ?, ?, ?)`).run(
-        approvalId, project.id, json({ charterId, charterVersion, interviewMode: interview.mode }), project.leadAgentId, at,
+        approvalId, project.id, json({ charterId, charterVersion, interviewMode: interview.mode, source: isHumanOwner ? 'human' : 'pl-proposal' }), project.leadAgentId, at,
       );
       this.store.db.prepare(`UPDATE projects SET status='CHARTER_PENDING_APPROVAL', version=version+1, updated_at=? WHERE id=?`).run(at, project.id);
-      this.activity({ operationId: op, projectId: project.id, eventType: 'CHARTER_DRAFTED', actor: who, objectRef: charterId, summary: `Charter v${charterVersion} drafted with user-confirmed facts separated from PL assumptions`, at });
+      this.activity({
+        operationId: op, projectId: project.id, eventType: 'CHARTER_DRAFTED', actor: who, objectRef: charterId,
+        summary: isHumanOwner
+          ? `Charter v${charterVersion} drafted with user-confirmed facts separated from PL assumptions`
+          : `Charter v${charterVersion} drafted by the PL from conversation facts; Human approval is still required`,
+        at,
+      });
     });
     return this.store.snapshot(project.id);
   }
@@ -315,12 +335,21 @@ export class AgentTeamControlPlane {
       roles.add(role);
       const runtime = this.requireUsableAuthorizedRuntime(member.providerKey);
       if (role === 'PROJECT_LEAD' && memberId !== project.leadAgentId) throw new ControlPlaneError('INVALID_TEAM', 'team must retain the assigned Project Lead');
+      // R1.3: permissions are validated as a subset of the frozen role template.
+      // Callers (PL or Panel) cannot introduce arbitrary permission strings, and
+      // skills never contribute permissions.
+      const template = DEFAULT_ROLE_PERMISSIONS[role];
+      const permissions = requireStringArray(member.permissions ?? template, `members[${index}].permissions`, { min: 1, max: 32 });
+      const outsideTemplate = permissions.filter((permission) => !template.includes(permission));
+      if (outsideTemplate.length > 0) {
+        throw new ControlPlaneError('INVALID_PERMISSIONS', `members[${index}] permissions outside the ${role} template are not allowed: ${outsideTemplate.join(', ')}`, 403);
+      }
       return {
         id: memberId,
         displayName: requireString(member.displayName, `members[${index}].displayName`, { max: 200 }),
         providerKey: runtime.providerKey,
         role,
-        permissions: requireStringArray(member.permissions ?? DEFAULT_ROLE_PERMISSIONS[role], `members[${index}].permissions`, { min: 1, max: 32 }),
+        permissions,
         skills: requireStringArray(member.skills ?? [], `members[${index}].skills`, { max: 16 }),
         replacesAgentId: member.replacesAgentId ? requireString(member.replacesAgentId, `members[${index}].replacesAgentId`, { max: 128 }) : null,
       };
@@ -859,6 +888,85 @@ export class AgentTeamControlPlane {
       this.activity({ operationId: op, projectId: project.id, eventType: 'TASK_PROPOSAL_REJECTED', actor: who, objectRef: proposal.id, summary: reason, at });
     });
     return this.store.snapshot(project.id);
+  }
+
+  // R1.2: binding a Project to one specific PL Session is a Human-only action.
+  // Every later `agent_team_*` call must prove it runs from exactly this Session.
+  bindProjectPlSession(input) {
+    const project = this.requireProject(input.projectId);
+    const who = this.assertHumanOwner(project, input.actor);
+    this.assertNewOperation(input.operationId);
+    const plSessionId = requireString(input.plSessionId, 'plSessionId', { max: 200 });
+    if (['STOPPED', 'COMPLETED'].includes(project.status)) {
+      throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'PL session binding requires a non-terminal project', 409);
+    }
+    const op = input.operationId;
+    const at = now();
+    this.store.transaction(() => {
+      this.store.setProjectPlSession(project.id, plSessionId, at);
+      this.activity({
+        operationId: op, projectId: project.id, eventType: 'PL_SESSION_BOUND', actor: who,
+        objectRef: plSessionId, summary: `Human bound Project to PL Session ${plSessionId}`, at,
+      });
+    });
+    return this.store.snapshot(project.id);
+  }
+
+  // R1.4: Host verification commands are Human-approved per Project. The PL may
+  // only select approved command IDs; free text never reaches PowerShell.
+  approveVerificationCommand(input) {
+    const project = this.requireProject(input.projectId);
+    const who = this.assertHumanOwner(project, input.actor);
+    this.assertNewOperation(input.operationId);
+    const command = requireString(input.command, 'command', { max: 4000 });
+    const timeoutMs = requireInteger(input.timeoutMs ?? 120000, 'timeoutMs', { min: 1000, max: 300000 });
+    const op = input.operationId;
+    const commandId = id('VCMD');
+    const at = now();
+    this.store.transaction(() => {
+      this.store.insertVerificationCommand({
+        id: commandId, projectId: project.id,
+        displayName: requireString(input.displayName ?? command.slice(0, 60), 'displayName', { max: 200 }),
+        command, timeoutMs, status: 'APPROVED',
+        createdBy: actorKey(who), createdAt: at, approvedAt: at,
+      });
+      this.activity({
+        operationId: op, projectId: project.id, eventType: 'VERIFICATION_COMMAND_APPROVED', actor: who,
+        objectRef: commandId, summary: `Human approved verification command: ${command}`, at,
+      });
+    });
+    return this.store.snapshot(project.id);
+  }
+
+  revokeVerificationCommand(input) {
+    const project = this.requireProject(input.projectId);
+    const who = this.assertHumanOwner(project, input.actor);
+    this.assertNewOperation(input.operationId);
+    const record = this.store.getVerificationCommand(project.id, requireString(input.commandId, 'commandId', { max: 128 }));
+    if (!record) throw new ControlPlaneError('VERIFICATION_COMMAND_NOT_FOUND', 'verification command does not exist in this project', 404);
+    if (record.status === 'REVOKED') return this.store.snapshot(project.id);
+    const op = input.operationId;
+    const at = now();
+    this.store.transaction(() => {
+      this.store.setVerificationCommandStatus(record.id, 'REVOKED', at);
+      this.activity({
+        operationId: op, projectId: project.id, eventType: 'VERIFICATION_COMMAND_REVOKED', actor: who,
+        objectRef: record.id, summary: `Human revoked verification command: ${record.command}`, at,
+      });
+    });
+    return this.store.snapshot(project.id);
+  }
+
+  // Resolves PL/Panel-selected verification command IDs to the Project's
+  // approved whitelist. Unknown or revoked IDs fail closed before any Run is created.
+  resolveVerificationCommands(projectId, commandIds) {
+    const ids = requireStringArray(commandIds ?? [], 'verification_command_ids', { max: 8, itemMax: 128 });
+    return ids.map((commandId) => {
+      const record = this.store.getVerificationCommand(projectId, commandId);
+      if (!record) throw new ControlPlaneError('VERIFICATION_COMMAND_NOT_FOUND', `verification command ${commandId} does not exist in this project`, 404);
+      if (record.status !== 'APPROVED') throw new ControlPlaneError('VERIFICATION_COMMAND_NOT_APPROVED', `verification command ${commandId} is ${record.status}`, 403);
+      return { command: record.command, timeoutMs: record.timeoutMs };
+    });
   }
 
   snapshot(projectId) {
