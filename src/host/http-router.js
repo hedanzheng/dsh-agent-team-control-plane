@@ -59,12 +59,26 @@ async function admitRequest(connection, request) {
   if (!connection || typeof connection.admit !== 'function') {
     throw new ControlPlaneError('AUTH_UNAVAILABLE', 'Host connection admission is unavailable', 503);
   }
-  let peer;
+  // Host contract (dsh-client-connection): admit() resolves to an admission
+  // envelope — `{ peer }` on success, `{ rejection: 401 | 403 }` when the
+  // request is untrusted or unauthenticated — and never throws for those
+  // cases. Unwrap the envelope; a legacy bare-Peer return is still accepted.
+  let admission;
   try {
-    peer = await connection.admit(request);
+    admission = await connection.admit(request);
   } catch {
     throw new ControlPlaneError('UNAUTHENTICATED', 'request was not admitted by the Host connection service', 401);
   }
+  if (!admission || typeof admission !== 'object') {
+    throw new ControlPlaneError('UNAUTHENTICATED', 'request was not admitted by the Host connection service', 401);
+  }
+  if (admission.rejection === 403) {
+    throw new ControlPlaneError('FORBIDDEN', 'request origin is not trusted by the Host connection service', 403);
+  }
+  if (admission.rejection !== undefined) {
+    throw new ControlPlaneError('UNAUTHENTICATED', 'request was not admitted by the Host connection service', 401);
+  }
+  const peer = admission.peer ?? admission;
   if (!peer || !isOwnerPrincipal(peer)) {
     throw new ControlPlaneError('FORBIDDEN', 'only the authenticated local owner may use the control plane route', 403);
   }

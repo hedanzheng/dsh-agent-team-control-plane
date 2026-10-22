@@ -724,7 +724,9 @@ window.__ModuleLoader__.load({
         h(RuntimeCatalog, { data, ownerId, busy, act }));
 
       let view;
-      if (!data) view = h('p', null, '正在读取 Host 状态…');
+      if (!data) view = h('div', { style: styles.card },
+        h('p', null, error ? `Host 状态读取失败：${error}` : '正在读取 Host 状态…'),
+        error && h(Button, { 'data-testid': 'retry-load', onClick: () => { setError(''); load().catch((e) => setError(e.message)); } }, '重试'));
       else if (activeView === 'pl-chat') view = h(PLChatView, { selected, busy, onOpenPLChat: launchPLChat, onNavigate: setActiveView });
       else if (activeView === 'project') view = projectView;
       else if (activeView === 'agents') view = h('section', { 'aria-labelledby': 'agents-heading', 'data-testid': 'view-agents' },

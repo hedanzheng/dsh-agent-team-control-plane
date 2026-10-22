@@ -49,8 +49,10 @@ function mockResponse() {
   };
 }
 
+// The Host connection service resolves to an admission envelope, never throws
+// for untrusted/unauthenticated requests: `{ peer }` or `{ rejection: 401|403 }`.
 function peerAdmitting(peer) {
-  return { async admit() { if (!peer) throw new Error('unauthenticated'); return peer; } };
+  return { async admit() { return peer ? { peer } : { rejection: 401 }; } };
 }
 
 // Simulates the Host connection service rejecting foreign Origin/Host headers.
@@ -59,9 +61,9 @@ function originCheckingAdmit() {
     async admit(request) {
       const origin = request.headers.origin;
       const host = request.headers.host;
-      if (origin !== undefined && origin !== 'https://app.local') throw new Error('cross-site origin');
-      if (host !== undefined && host !== 'app.local:51700') throw new Error('foreign host');
-      return { principal: { kind: 'owner', id: 'owner-peer-1' } };
+      if (origin !== undefined && origin !== 'https://app.local') return { rejection: 403 };
+      if (host !== undefined && host !== 'app.local:51700') return { rejection: 403 };
+      return { peer: { principal: { kind: 'owner', id: 'owner-peer-1' } } };
     },
   };
 }
@@ -137,7 +139,7 @@ test('cross-site Origin and foreign Host headers are rejected by admission', asy
   ]) {
     const response = mockResponse();
     await handler(mockRequest({ method: 'POST', headers, body: { action: 'create-task' } }), response);
-    assert.equal(response.state.status, 401, JSON.stringify(headers));
+    assert.equal(response.state.status, 403, JSON.stringify(headers));
   }
   const good = mockResponse();
   await handler(mockRequest({
