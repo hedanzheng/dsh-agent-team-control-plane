@@ -1,0 +1,284 @@
+{
+  "schemaVersion": 1,
+  "capturedAt": "2026-10-22T04:13:23.0081530Z",
+  "classification": "R0_REDACTED_EVIDENCE",
+  "baseline": {
+    "repository": "hedanzheng/dsh-agent-team-control-plane",
+    "branch": "main",
+    "gitSha": "35241d1bec2fef339468de39f174ffc41cad9305",
+    "initialWorktreeClean": true,
+    "pluginVersion": "0.5.7"
+  },
+  "environment": {
+    "desktopProduct": "DeepSeek Harness Desktop",
+    "desktopVersion": "0.2.1-rc.2",
+    "hostNode": "24.21.0",
+    "developerShellNode": "24.15.0",
+    "os": "Windows NT 10.0.26200.0",
+    "hostPackageVersion": "0.2.1-rc.2"
+  },
+  "evidenceLevels": {
+    "TYPE": "installed Host documentation, types, or implementation",
+    "CURRENT_HOST": "reproduced against the installed Desktop Host during R0",
+    "HISTORICAL_HOST": "durable evidence created by this Host before R0",
+    "MOCK": "in-memory or unit evidence only"
+  },
+  "hostServices": {
+    "pluginDeclaredHostInject": [
+      "webServer",
+      "llm",
+      "subagents",
+      "skills",
+      "tools",
+      "systemPrompt"
+    ],
+    "pluginDeclaredClientInject": [
+      "slots",
+      "layout",
+      "uiWorkspace",
+      "sessions",
+      "workspaces",
+      "conversation"
+    ],
+    "completeRegistryEnumeration": {
+      "status": "UNKNOWN",
+      "reason": "no supported API for enumerating the complete ctx service registry was found"
+    },
+    "agentRegistryAccess": {
+      "status": "SUPPORTED",
+      "mechanism": "ctx.get('agents')",
+      "declaredInPluginInject": false
+    }
+  },
+  "httpBoundary": {
+    "authority": "http://127.0.0.1:<redacted-port>",
+    "route": "/agent-team-control-plane/v1",
+    "rootWithoutCredentialsStatus": 401,
+    "snapshotBodyPersisted": false,
+    "snapshotBodyPrinted": false,
+    "snapshotResponseBytes": 102086,
+    "snapshotResponseSha256": "ff8c87b093b078b5718cffb8000f6ae307941cc8207fc3c997aed97a32d5e0c9",
+    "getCases": [
+      {
+        "case": "no-origin-no-credentials",
+        "status": 200
+      },
+      {
+        "case": "desktop-origin",
+        "status": 200
+      },
+      {
+        "case": "foreign-origin",
+        "status": 200
+      },
+      {
+        "case": "null-origin",
+        "status": 200
+      },
+      {
+        "case": "foreign-origin-cross-site",
+        "status": 200
+      },
+      {
+        "case": "dummy-authorization",
+        "status": 200
+      },
+      {
+        "case": "dummy-cookie",
+        "status": 200
+      },
+      {
+        "case": "dummy-csrf-header",
+        "status": 200
+      },
+      {
+        "case": "foreign-host",
+        "status": 200
+      }
+    ],
+    "options": {
+      "status": 405,
+      "allow": "GET, POST",
+      "accessControlAllowOriginPresent": false
+    },
+    "sideEffectFreePost": {
+      "contentType": "text/plain",
+      "bodyClass": "empty JSON object",
+      "foreignOrigin": true,
+      "status": 400,
+      "errorCode": "UNKNOWN_ACTION",
+      "businessDispatcherReached": true,
+      "databaseMutationExpected": false
+    },
+    "browserPrivateNetworkAccessEndToEnd": {
+      "status": "UNKNOWN",
+      "reason": "not tested; server-side same-machine unauthenticated access is independently established"
+    },
+    "verdict": "UNSUPPORTED_AUTHENTICATION_AND_ORIGIN_FENCE"
+  },
+  "toolBoundary": {
+    "trustedFields": [
+      "exec.agent object identity",
+      "exec.agent.id",
+      "exec.agent.session.id",
+      "exec.parent causal tool call",
+      "exec.signal"
+    ],
+    "trustedHumanIdentityPresent": false,
+    "trustedProjectIdentityPresent": false,
+    "trustedWorkspaceAuthorizationPresent": false,
+    "globalRegistration": true,
+    "projectBindingGuardPresent": false,
+    "safeMemoryPoc": {
+      "evidenceLevel": "MOCK",
+      "realDatabaseTouched": false,
+      "ordinarySessionAccepted": true,
+      "crossProjectIdAccepted": true,
+      "projectParentBoundToOrdinarySession": true,
+      "databasePlActorSynthesized": true,
+      "databaseHumanActorSynthesized": true
+    },
+    "verdict": "UNSUPPORTED_PROJECT_AND_ROLE_AUTHORIZATION"
+  },
+  "plSession": {
+    "createReturnsSessionId": {
+      "status": "SUPPORTED",
+      "apis": [
+        "ctx.sessions.create",
+        "ctx.uiWorkspace.openWorkspace callback"
+      ]
+    },
+    "openExistingSession": {
+      "status": "SUPPORTED",
+      "api": "ctx.uiWorkspace.openSession(sessionId)"
+    },
+    "currentPluginPersistsProjectSessionBinding": false,
+    "currentPluginUsesOpenExistingSession": false,
+    "isolatedProbe": {
+      "evidenceLevel": "CURRENT_HOST",
+      "sessionId": "<redacted-session-id>",
+      "created": true,
+      "turns": 2,
+      "sameSession": true,
+      "projectionPersisted": true,
+      "actualLastUsed": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "reasoningEffort": "high"
+      },
+      "modelSource": "internal persisted projection; not treated as a stable plugin API"
+    },
+    "hostRestartAndProjectReopen": {
+      "status": "UNKNOWN",
+      "reason": "Host APIs support resume/openSession, but no Project association exists and a complete restart-navigation test was not completed"
+    },
+    "selectedProjectRuntimeMatchesActualSession": {
+      "status": "UNSUPPORTED",
+      "reason": "current client passes agentPreset standard and does not apply or verify leadRuntimeKey"
+    }
+  },
+  "liveRuntimeCatalogue": {
+    "capturedFrom": "control-plane live Host snapshot",
+    "items": [
+      {
+        "providerKey": "subagent:fork",
+        "kind": "external-worker",
+        "availability": "AVAILABLE",
+        "backendMode": "continuable",
+        "activationApi": true,
+        "actualModel": "UNKNOWN"
+      },
+      {
+        "providerKey": "subagent:spawn",
+        "kind": "external-worker",
+        "availability": "AVAILABLE",
+        "backendMode": "continuable",
+        "activationApi": true,
+        "actualModel": "UNKNOWN"
+      },
+      {
+        "providerKey": "harness:a6api",
+        "kind": "harness-agent",
+        "availability": "NOT_CONFIGURED",
+        "models": []
+      },
+      {
+        "providerKey": "harness:deepseek-account",
+        "kind": "harness-agent",
+        "availability": "NOT_CONFIGURED",
+        "models": []
+      },
+      {
+        "providerKey": "harness:deepseek-official",
+        "kind": "harness-agent",
+        "availability": "AVAILABLE",
+        "models": [
+          "deepseek-flash",
+          "deepseek-v4-pro"
+        ]
+      }
+    ],
+    "registeredProductionExternalProviders": {
+      "codex": false,
+      "claudeCode": false
+    }
+  },
+  "subagentLifecycle": {
+    "startActivationApi": "SUPPORTED",
+    "currentAdapterUsesStartActivation": true,
+    "productionHistoricalRuns": {
+      "evidenceLevel": "HISTORICAL_HOST",
+      "providerKey": "subagent:fork",
+      "succeededAfterManagedActivationFix": 3,
+      "olderCannotStartBeforeFix": 5,
+      "runtimeSessionReferencesPresentForSuccesses": true,
+      "historicalChildLastUsed": {
+        "observedSessions": 3,
+        "provider": "deepseek-account",
+        "model": "deepseek-flash",
+        "reasoningEffort": "high"
+      }
+    },
+    "freshManagedForkOrSpawnCancellation": {
+      "status": "UNKNOWN",
+      "reason": "not run against production state during R0"
+    },
+    "isolatedDirectCodexProbe": {
+      "evidenceLevel": "CURRENT_HOST",
+      "managedStartActivationPath": false,
+      "oneShotCompleted": true,
+      "cancellationStopReason": "aborted",
+      "outsideWorkspaceWriteOccurred": false
+    }
+  },
+  "reviewerBoundary": {
+    "independentReviewRunRecordsInProduction": 0,
+    "sameProjectCwdPassed": true,
+    "promptRequestsReadOnly": true,
+    "hostEnforcedReadOnlySandboxSelected": false,
+    "reviewerSpecificCommandDenialFound": false,
+    "actualReviewerEndToEnd": "UNKNOWN",
+    "preventativeReadOnlyGuarantee": "UNSUPPORTED"
+  },
+  "skillBoundary": {
+    "snapshotComplete": true,
+    "discoveredSkillNames": [
+      "diagnose-windows-sandbox-acl"
+    ],
+    "grillMeAvailable": false,
+    "grillMeInvocationObserved": false,
+    "fallbackInterviewRequired": true,
+    "verdict": "UNSUPPORTED_ABSENT"
+  },
+  "sensitiveDataHandling": {
+    "launchTokenStored": false,
+    "signedCookieStored": false,
+    "authorizationValueStored": false,
+    "apiKeyStored": false,
+    "credentialFileRead": false,
+    "fullSnapshotStored": false,
+    "fullPromptOrResponseStored": false,
+    "actualProjectContentStored": false,
+    "sessionAndRunIdentifiersRedacted": true
+  }
+}
