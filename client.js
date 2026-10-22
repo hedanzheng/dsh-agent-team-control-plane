@@ -298,7 +298,7 @@ window.__ModuleLoader__.load({
       return h('section', { style: styles.section, 'aria-labelledby': 'pl-chat-heading', 'data-testid': 'view-pl-chat' },
         h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
           h('strong', { id: 'pl-chat-heading' }, 'PL 工作台'),
-          canOpen && h(Button, { disabled: busy, 'data-testid': 'open-pl-chat', onClick: () => onOpenPLChat(selected) }, '打开新的 PL 工作对话'),
+          canOpen && h(Button, { disabled: busy, 'data-testid': 'open-pl-chat', onClick: () => onOpenPLChat(selected) }, selected.project.plSessionId ? '返回 PL 对话' : '创建 PL 对话'),
           selected && status === 'STOPPED' && h(Button, { disabled: busy, onClick: () => onNavigate('project') }, '前往恢复 Project'),
           selected && status === 'COMPLETED' && h(Button, { disabled: busy, onClick: () => onNavigate('tasks') }, '查看交付历史')),
         !selected && h('div', { style: styles.card }, '请先创建或选择 Project。'),
@@ -658,7 +658,15 @@ window.__ModuleLoader__.load({
         try {
           const next = await request(action, body);
           setData(next); setSelectedProjectId(next.selected?.project?.id || ''); setCreateMode(false);
-          if (action === 'create-project' && next.selected?.project) await onOpenPLChat(next.selected);
+          if (action === 'create-project' && next.selected?.project) {
+            try {
+              await onOpenPLChat(next.selected);
+            } catch (e) {
+              // R3.3: the Project record is already committed. Surface a
+              // recoverable state instead of a duplicate Project on retry.
+              setError(`Project 已创建，但 PL 对话未打开：${e.message}。可在“PL 工作台”重新绑定，不会重复创建 Project。`);
+            }
+          }
         }
         catch (e) { setError(`${e.code ? `${e.code}: ` : ''}${e.message}`); }
         finally { setBusy(false); }
@@ -666,7 +674,10 @@ window.__ModuleLoader__.load({
 
       const launchPLChat = async (projectState) => {
         setBusy(true); setError('');
-        try { await onOpenPLChat(projectState); }
+        try {
+          const outcome = await onOpenPLChat(projectState);
+          if (outcome?.message) setError(outcome.message);
+        }
         catch (e) { setError(`PL_CHAT_START_FAILED: ${e.message}`); }
         finally { setBusy(false); }
       };
@@ -704,7 +715,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { marginTop: 8 } }, h('b', null, 'Mission: '), (selected.charters.find((charter) => charter.version === selected.project.charterVersion) || selected.charters.at(-1))?.mission || selected.project.initialGoal),
           h('div', { style: styles.muted }, `当前里程碑：${(scopedTasks.find((task) => task.status !== 'VERIFIED') || {}).title || '范围内任务均已完成'} · 验收 ${verifiedTasks.length}/${scopedTasks.length}${cancelledTasks.length ? ` · 历史取消 ${cancelledTasks.length}` : ''}`),
           h('div', { style: { ...styles.row, marginTop: 9 } },
-            !['STOPPED', 'COMPLETED'].includes(selected.project.status) && h(Button, { disabled: busy, 'data-testid': 'open-project-pl-chat', onClick: () => launchPLChat(selected) }, '打开新的 PL 工作对话'),
+            !['STOPPED', 'COMPLETED'].includes(selected.project.status) && h(Button, { disabled: busy, 'data-testid': 'open-project-pl-chat', onClick: () => launchPLChat(selected) }, selected.project.plSessionId ? '返回 PL 对话' : '创建 PL 对话'),
             selected.project.status === 'STOPPED' && h(Button, {
               disabled: busy, 'data-testid': 'resume-project',
               onClick: () => act('resume-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version }),
@@ -806,6 +817,18 @@ window.__ModuleLoader__.load({
         const openPLChat = async (projectState) => {
           const project = projectState?.project || projectState;
           if (!project) throw new Error('请先创建或选择 Project');
+          // R3.3: never create a second PL Session for a Project that is already
+          // bound. If the bound Session still exists in the Host, reuse it and
+          // direct the Human to the left sidebar (the primary entry point).
+          if (project.plSessionId) {
+            const sessionSnapshot = ctx.sessions.list.getSnapshot();
+            const stillLive = Boolean(sessionSnapshot.byId?.[project.plSessionId]);
+            if (stillLive) {
+              return { reused: true, sessionId: project.plSessionId, message: '已有 PL 对话，请在左侧栏继续；不会重复创建 Session。' };
+            }
+            // The previously bound Session no longer exists in the Host; fall
+            // through to create exactly one replacement and rebind it.
+          }
           const workspaceId = resolveWorkspaceId(project);
           if (!workspaceId) throw new Error('没有可用的 Harness Workspace，请先在左侧项目区打开工作目录');
           const prompt = [
@@ -840,6 +863,7 @@ window.__ModuleLoader__.load({
               console.error(`PL Session 绑定失败（agent_team_* 工具将被拒绝）: ${error.message}`);
             });
           }, { agentPreset: 'standard' });
+          return { reused: false, sessionId: null, message: '已创建并绑定新的 PL 对话。' };
         };
         ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main', key: 'agent-team-control-plane',

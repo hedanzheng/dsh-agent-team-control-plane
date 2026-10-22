@@ -39,7 +39,7 @@ function syntheticResult(kind, summary, raw = '') {
 }
 
 export class TaskRunCoordinator {
-  constructor({ store, controlPlane, adapters, governance = null, logger, artifactVerifier = verifyArtifacts, commandVerifier = runVerificationCommands, workspaceSnapshooter = snapshotWorkspace, workspaceDiffer = diffWorkspace, workspaceClassifier = classifyWorkspaceChanges }) {
+  constructor({ store, controlPlane, adapters, governance = null, logger, artifactVerifier = verifyArtifacts, commandVerifier = runVerificationCommands, workspaceSnapshooter = snapshotWorkspace, workspaceDiffer = diffWorkspace, workspaceClassifier = classifyWorkspaceChanges, gracePeriodMs = 30000 }) {
     this.store = store;
     this.controlPlane = controlPlane;
     this.adapters = adapters;
@@ -50,6 +50,10 @@ export class TaskRunCoordinator {
     this.workspaceSnapshooter = workspaceSnapshooter;
     this.workspaceDiffer = workspaceDiffer;
     this.workspaceClassifier = workspaceClassifier;
+    // R3.1: after the timeout fires and cancellation is signalled, the Runtime
+    // gets this bounded grace period to actually settle. Once it elapses the Run
+    // is converged to UNKNOWN instead of remaining RUNNING forever.
+    this.gracePeriodMs = gracePeriodMs;
     this.jobs = new Map();
     this.cancelReasons = new Map();
     this.watchdogTimer = null;
@@ -150,7 +154,10 @@ export class TaskRunCoordinator {
       if (this.cancelReasons.get(spec.runId) === 'cancel') {
         this.adapters.cancelRun(spec.runId, 'Human/PL cancellation requested while starting');
       }
-      const runtimeResult = await this.adapters.collectRunResult(spec.runId);
+      // R3.1: bound the collection wait. If the Runtime never resolves the result
+      // (or ignores cancellation), the grace deadline forces a UNKNOWN terminal
+      // state rather than leaving the Run RUNNING forever.
+      const runtimeResult = await this.collectRunResultBounded(spec, spec.timeoutMs + this.gracePeriodMs);
       await this.finishFromRuntime(spec, runtimeResult);
     } catch (error) {
       await this.finishSynthetic(
@@ -202,6 +209,45 @@ export class TaskRunCoordinator {
     const current = this.store.getTaskRun(spec.runId);
     if (!current || !ACTIVE_RUN.has(current.status)) return;
     await this.persistTerminal(spec, syntheticResult(kind, message), { stopReason: 'error', output: [] }, [], [], { code, message });
+  }
+
+  // R3.1: wait for the Runtime result but never forever. When the grace deadline
+  // elapses first, synthesize an `unresponsive` stop reason that finishFromRuntime
+  // maps to a UNKNOWN terminal state.
+  async collectRunResultBounded(spec, deadlineMs) {
+    let graceTimer;
+    const grace = new Promise((resolve) => {
+      graceTimer = setTimeout(() => resolve({
+        runId: spec.runId, taskId: spec.task.id, agentId: spec.agent.id,
+        runtimeRunId: null, stopReason: 'unresponsive', output: [],
+        diagnostic: 'Runtime did not return a result within the bounded wait',
+      }), deadlineMs);
+      graceTimer.unref?.();
+    });
+    try {
+      return await Promise.race([this.adapters.collectRunResult(spec.runId), grace]);
+    } finally {
+      clearTimeout(graceTimer);
+    }
+  }
+
+  // R3.1: converge a Run whose runtime handle is no longer live into a
+  // deterministic UNKNOWN terminal state (Task → WAITING, lock released), with
+  // audit evidence, instead of leaving it RUNNING forever. Never auto-replays.
+  async convergeLostRun(runId) {
+    const run = this.store.getTaskRun(runId);
+    if (!run || !ACTIVE_RUN.has(run.status)) return;
+    const task = this.store.getTask(run.taskId);
+    if (!task) return;
+    const project = this.controlPlane.requireProject(task.projectId);
+    const agent = this.store.listAgents(project.id).find((item) => item.id === run.agentId) ?? { id: run.agentId, providerKey: run.providerKey };
+    await this.persistTerminal(
+      { runId, project, task, agent, prompt: '', timeoutMs: 0, parentAgent: undefined },
+      syntheticResult('UNKNOWN', 'runtime stopped responding; Run converged to UNKNOWN by the watchdog'),
+      { stopReason: 'lost', output: [], diagnostic: 'runtime handle was no longer live and the result was never collected' },
+      [], [],
+      { code: 'RUNTIME_LOST', message: 'runtime stopped responding' },
+    );
   }
 
   // R2.1: re-scan the workspace after a write Run and classify the actual
@@ -394,6 +440,12 @@ export class TaskRunCoordinator {
           const observed = this.adapters.observeRun(run.id);
           const state = observed.state === 'RUNNING' || observed.state === 'CANCEL_REQUESTED' ? 'ACTIVE_NO_HEARTBEAT' : 'SUSPECTED_LOST';
           this.store.db.prepare('UPDATE task_runs SET watchdog_state=? WHERE id=?').run(state, run.id);
+          // R3.1: a lost runtime (no longer live) must converge to a terminal
+          // state, not linger as RUNNING. Fire-and-forget; convergence is
+          // idempotent against a natural finish.
+          if (state === 'SUSPECTED_LOST') {
+            this.convergeLostRun(run.id).catch((error) => this.logger.warn(`Lost Run ${run.id} convergence failed: ${error instanceof Error ? error.message : String(error)}`));
+          }
         }
       } catch (error) {
         this.logger.warn(`Task Run watchdog check failed: ${error instanceof Error ? error.message : String(error)}`);

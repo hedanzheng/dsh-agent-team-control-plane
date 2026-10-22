@@ -334,6 +334,10 @@ export class CollaborationGovernance {
   }
 
   verifyTask({ projectId, task, reviewId, actor, evidenceRefs, at, riskAccepted = false }) {
+    const project = this.controlPlane.requireProject(projectId);
+    if (['STOPPED', 'COMPLETED'].includes(project.status)) {
+      throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'Tasks cannot be VERIFIED in a stopped or completed Project', 409);
+    }
     this.store.db.prepare(`UPDATE tasks SET status='VERIFIED', waiting_reason=NULL, waiting_on_ref=NULL,
       checkpoint_ref=NULL, waiting_deadline=NULL, version=version+1, updated_at=? WHERE id=?`).run(at, task.id);
     this.controlPlane.addTaskStateEvent({ taskId: task.id, fromStatus: task.status, toStatus: 'VERIFIED', actor, reason: riskAccepted ? `Approved by ${reviewId} with Human-accepted unverified risk` : `Approved by ${reviewId}`, evidenceRefs, at });
@@ -403,6 +407,9 @@ export class CollaborationGovernance {
     const task = this.store.getTask(requireString(input.taskId, 'taskId', { max: 128 }));
     if (!task) throw new ControlPlaneError('TASK_NOT_FOUND', 'Task does not exist', 404);
     const project = this.controlPlane.requireProject(task.projectId);
+    // R3.2: a late review decision must not revive a Task in a stopped or
+    // completed Project.
+    if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'Task review requires an ACTIVE Project', 409);
     if (task.status !== 'SUBMITTED' || !task.resultId) throw new ControlPlaneError('TASK_NOT_SUBMITTED', 'Review requires a submitted Task Result', 409);
     const actor = requireActor(input.actor);
     const decision = enumValue(input.decision, 'decision', ['APPROVE', 'REJECT']);
@@ -541,6 +548,19 @@ export class CollaborationGovernance {
         return;
       }
       const parsed = this.parseReviewOutput(runtimeResult.output, result);
+      // R3.2: the Project may have been stopped/completed while this Review Run
+      // was executing. A late decision must not revive the Task; mark the Run
+      // ABANDONED and leave Task state untouched.
+      const currentProject = this.controlPlane.requireProject(project.id);
+      if (currentProject.status !== 'ACTIVE') {
+        const endedAt = now();
+        this.store.transaction(() => {
+          this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL").run(reviewer.id);
+          this.store.db.prepare("UPDATE review_runs SET status='ABANDONED', raw_output_excerpt=?, ended_at=? WHERE id=?").run(parsed.raw, endedAt, reviewRunId);
+          this.controlPlane.activity({ operationId: `${reviewRunId}:abandoned`, projectId: project.id, eventType: 'REVIEW_RUN_ABANDONED', actor: { type: 'agent', id: reviewer.id }, objectRef: reviewRunId, summary: `Independent Review result discarded because the Project is ${currentProject.status}`, at: endedAt });
+        });
+        return;
+      }
       this.store.db.prepare("UPDATE agents SET status='IDLE' WHERE id=? AND current_task_id IS NULL").run(reviewer.id);
       this.submitReview({
         actor: { type: 'agent', id: reviewer.id }, operationId: `${reviewRunId}:submit`, taskId: task.id,
@@ -586,6 +606,9 @@ export class CollaborationGovernance {
   }
 
   returnForRework({ project, task, reviewId, actor, issues, evidenceRefs, at }) {
+    if (['STOPPED', 'COMPLETED'].includes(project.status)) {
+      throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'Tasks cannot be returned for rework in a stopped or completed Project', 409);
+    }
     let assignedAgentId = task.assignedAgentId;
     if (assignedAgentId) {
       const agent = this.controlPlane.requireProjectAgent(project, assignedAgentId);
