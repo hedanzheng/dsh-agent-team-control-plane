@@ -2,6 +2,7 @@ import { id, json, now, requireActor, requireInteger, requireString, requireStri
 import { buildTaskRunContext } from './context-builder.js';
 import { outputText, parseStructuredResult } from './result-parser.js';
 import { runVerificationCommands, verifyArtifacts } from './verification.js';
+import { classifyWorkspaceChanges, diffWorkspace, snapshotWorkspace } from './workspace-diff.js';
 
 const ACTIVE_RUN = new Set(['CREATED', 'STARTING', 'RUNNING']);
 
@@ -38,7 +39,7 @@ function syntheticResult(kind, summary, raw = '') {
 }
 
 export class TaskRunCoordinator {
-  constructor({ store, controlPlane, adapters, governance = null, logger, artifactVerifier = verifyArtifacts, commandVerifier = runVerificationCommands }) {
+  constructor({ store, controlPlane, adapters, governance = null, logger, artifactVerifier = verifyArtifacts, commandVerifier = runVerificationCommands, workspaceSnapshooter = snapshotWorkspace, workspaceDiffer = diffWorkspace, workspaceClassifier = classifyWorkspaceChanges }) {
     this.store = store;
     this.controlPlane = controlPlane;
     this.adapters = adapters;
@@ -46,6 +47,9 @@ export class TaskRunCoordinator {
     this.logger = logger;
     this.artifactVerifier = artifactVerifier;
     this.commandVerifier = commandVerifier;
+    this.workspaceSnapshooter = workspaceSnapshooter;
+    this.workspaceDiffer = workspaceDiffer;
+    this.workspaceClassifier = workspaceClassifier;
     this.jobs = new Map();
     this.cancelReasons = new Map();
     this.watchdogTimer = null;
@@ -86,6 +90,10 @@ export class TaskRunCoordinator {
     const runId = id('RUN');
     const createdAt = now();
     const { prompt } = buildTaskRunContext(this.store, { project, task, agent, verificationCommands });
+    // R2.1: capture a trusted workspace baseline BEFORE the write Run starts,
+    // so the post-Run diff can attribute actual filesystem changes to the Run.
+    const workspaceBaseline = writeIntent ? this.workspaceSnapshooter(project.workspaceDir) : null;
+    const workspaceBaselineJson = workspaceBaseline ? json([...workspaceBaseline.entries()]) : null;
     this.store.transaction(() => {
       if (writeIntent) {
         const locked = this.store.db.prepare('SELECT run_id FROM workspace_locks WHERE workspace_ref=?').get(project.workspaceDir);
@@ -94,10 +102,10 @@ export class TaskRunCoordinator {
       this.store.db.prepare(`INSERT INTO task_runs(
         id, task_id, agent_id, provider_key, attempt, runtime_session_ref, workspace_ref, write_intent,
         status, terminal_kind, terminal_payload_ref, capability_snapshot_json, verification_commands_json,
-        watchdog_state, error_code, error_message, started_at, ended_at, heartbeat_at, cancel_requested_at, created_at
-      ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, 'CREATED', NULL, NULL, ?, ?, 'HEALTHY', NULL, NULL, NULL, NULL, ?, NULL, ?)`).run(
+        workspace_baseline_json, watchdog_state, error_code, error_message, started_at, ended_at, heartbeat_at, cancel_requested_at, created_at
+      ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, 'CREATED', NULL, NULL, ?, ?, ?, 'HEALTHY', NULL, NULL, NULL, NULL, ?, NULL, ?)`).run(
         runId, task.id, agent.id, agent.providerKey, attempts + 1, project.workspaceDir, writeIntent ? 1 : 0,
-        json(descriptor.capabilities), json(verificationCommands), createdAt, createdAt,
+        json(descriptor.capabilities), json(verificationCommands), workspaceBaselineJson, createdAt, createdAt,
       );
       this.addRunEvent(runId, null, 'CREATED', { operationId }, createdAt);
       this.store.db.prepare("UPDATE task_runs SET status='STARTING' WHERE id=?").run(runId);
@@ -196,17 +204,38 @@ export class TaskRunCoordinator {
     await this.persistTerminal(spec, syntheticResult(kind, message), { stopReason: 'error', output: [] }, [], [], { code, message });
   }
 
+  // R2.1: re-scan the workspace after a write Run and classify the actual
+  // change set (added/modified/deleted) against the Task scope. Forbidden and
+  // out-of-scope paths become FAILED evidence; they are never silently accepted.
+  auditWorkspace(spec, run) {
+    if (!run.writeIntent || !run.workspaceBaseline) return null;
+    const before = new Map(run.workspaceBaseline);
+    const after = this.workspaceSnapshooter(spec.project.workspaceDir);
+    const diff = this.workspaceDiffer(before, after);
+    const classification = this.workspaceClassifier(spec.project.workspaceDir, diff, spec.task.scope);
+    const changeKind = (path) => (diff.added.includes(path) ? 'added' : diff.modified.includes(path) ? 'modified' : 'deleted');
+    const scopeEvidence = [
+      ...classification.forbidden.map((path) => ({ kind: 'FILE', ref: path, status: 'FAILED', details: { reason: 'forbidden scope modification', change: changeKind(path), scope: 'forbidden' } })),
+      ...classification.outOfScope.map((path) => ({ kind: 'FILE', ref: path, status: 'FAILED', details: { reason: 'out-of-scope modification', change: changeKind(path), scope: 'out-of-scope' } })),
+    ];
+    return { diff, classification, scopeEvidence, after };
+  }
+
   async persistTerminal(spec, parsed, runtimeResult, verificationRuns = [], artifactEvidence = [], explicitError = null) {
     const run = this.store.getTaskRun(spec.runId);
     if (!run || !ACTIVE_RUN.has(run.status)) return;
     const currentTask = this.store.getTask(spec.task.id);
     const resultId = id('RESULT');
     const at = now();
+    // R2.1: audit the ACTUAL workspace change set against Task scope.
+    const workspaceAudit = this.auditWorkspace(spec, run);
+    const scopeEvidence = workspaceAudit?.scopeEvidence ?? [];
     let outcome = parsed.terminalKind;
     if (parsed.terminalKind === 'SUCCESS') {
       const commandsPass = verificationRuns.length > 0 && verificationRuns.every((item) => item.status === 'PASSED');
       const filesPass = artifactEvidence.every((item) => item.status === 'VERIFIED');
-      if (!commandsPass || !filesPass) outcome = 'PARTIAL';
+      const scopePass = scopeEvidence.length === 0;
+      if (!commandsPass || !filesPass || !scopePass) outcome = 'PARTIAL';
     }
     const verificationUnresolved = [];
     if (parsed.terminalKind === 'SUCCESS' && verificationRuns.length === 0) {
@@ -214,6 +243,9 @@ export class TaskRunCoordinator {
     }
     for (const item of artifactEvidence.filter((entry) => entry.status !== 'VERIFIED')) {
       verificationUnresolved.push(`Host artifact verification failed for ${item.ref}: ${item.details?.error ?? item.status}`);
+    }
+    for (const item of scopeEvidence) {
+      verificationUnresolved.push(`Workspace scope violation: ${item.details?.change ?? 'changed'} ${item.ref} (${item.details?.reason})`);
     }
     for (const item of verificationRuns.filter((entry) => entry.status !== 'PASSED')) {
       const diagnostic = item.stderrExcerpt || item.stdoutExcerpt || item.status;
@@ -229,7 +261,7 @@ export class TaskRunCoordinator {
       status: parsed.terminalKind === 'UNKNOWN' ? 'UNVERIFIED' : ['FAILED', 'CANNOT_START', 'CANCELLED', 'TIMED_OUT'].includes(parsed.terminalKind) ? 'FAILED' : 'VERIFIED',
       details: { stopReason: runtimeResult.stopReason, diagnostic: runtimeResult.diagnostic ?? null, providerKey: run.providerKey, capabilities: run.capabilities },
     };
-    const allEvidence = [...artifactEvidence, ...commandEvidence, runtimeEvidence].map((item) => ({ ...item, id: id('EVIDENCE') }));
+    const allEvidence = [...artifactEvidence, ...scopeEvidence, ...commandEvidence, runtimeEvidence].map((item) => ({ ...item, id: id('EVIDENCE') }));
     const verifiedActions = [
       ...artifactEvidence.filter((item) => item.status === 'VERIFIED').map((item) => `Host hashed artifact ${item.ref}`),
       ...verificationRuns.filter((item) => item.status === 'PASSED').map((item) => `Host command passed: ${item.command}`),
@@ -265,8 +297,11 @@ export class TaskRunCoordinator {
         );
       }
       this.store.db.prepare(`UPDATE task_runs SET status=?, terminal_kind=?, terminal_payload_ref=?,
-        error_code=?, error_message=?, ended_at=?, heartbeat_at=?, watchdog_state='TERMINAL' WHERE id=?`).run(
-        runStatus, parsed.terminalKind, resultId, error?.code ?? null, error?.message ?? null, at, at, spec.runId,
+        workspace_diff_json=?, error_code=?, error_message=?, ended_at=?, heartbeat_at=?, watchdog_state='TERMINAL' WHERE id=?`).run(
+        runStatus, parsed.terminalKind, resultId, workspaceAudit ? json({
+          added: workspaceAudit.diff.added, modified: workspaceAudit.diff.modified,
+          deleted: workspaceAudit.diff.deleted, scope: workspaceAudit.classification,
+        }) : null, error?.code ?? null, error?.message ?? null, at, at, spec.runId,
       );
       this.addRunEvent(spec.runId, run.status, runStatus, { resultId, outcome, stopReason: runtimeResult.stopReason }, at);
       const waitingReason = taskStatus === 'WAITING' ? parsed.changeSummary : null;

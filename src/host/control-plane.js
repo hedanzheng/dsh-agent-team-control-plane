@@ -814,7 +814,20 @@ export class AgentTeamControlPlane {
     }
     if (toStatus === 'VERIFIED') {
       if (!task.resultId || evidenceRefs.length === 0) throw new ControlPlaneError('EVIDENCE_REQUIRED', 'VERIFIED requires a submitted result and evidenceRefs', 409);
-      if (task.reviewPolicy === 'REVIEWER_PL') throw new ControlPlaneError('REVIEW_REQUIRED', 'Reviewer + PL records are required; implemented in Phase 4', 409);
+      // R2.2: VERIFIED must not bypass the Result/Evidence gates. The submitted
+      // Result must exist, be SUCCESS, carry no FAILED evidence, and every
+      // referenced evidence must belong to that Result.
+      const result = this.store.getResult(task.resultId);
+      if (!result) throw new ControlPlaneError('RESULT_NOT_FOUND', 'VERIFIED requires the submitted Result to exist', 409);
+      if (result.outcome !== 'SUCCESS') throw new ControlPlaneError('VERIFICATION_INCOMPLETE', 'VERIFIED requires a SUCCESS Result; partial or unverified Results must go through review', 409);
+      if (this.store.listEvidence(task.projectId).some((item) => item.resultId === result.id && item.status === 'FAILED')) {
+        throw new ControlPlaneError('VERIFICATION_INCOMPLETE', 'VERIFIED requires no FAILED evidence', 409);
+      }
+      const validEvidence = new Set(result.evidenceRefs);
+      if (evidenceRefs.some((ref) => !validEvidence.has(ref))) {
+        throw new ControlPlaneError('REVIEW_EVIDENCE_INVALID', 'VERIFIED evidence must belong to the current Result', 409);
+      }
+      if (task.reviewPolicy === 'REVIEWER_PL') throw new ControlPlaneError('REVIEW_REQUIRED', 'Reviewer + PL records are required', 409);
       if (task.reviewPolicy === 'PL' && !(who.type === 'pl' && who.id === project.leadAgentId)) {
         throw new ControlPlaneError('PL_REVIEW_REQUIRED', 'this Task requires Project Lead review', 409);
       }

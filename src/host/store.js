@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_ROLE_PERMISSIONS, json, parseJson } from '../shared/contracts.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 function mapProject(row) {
   if (!row) return undefined;
@@ -181,6 +181,8 @@ function mapTaskRun(row) {
     terminalPayloadRef: row.terminal_payload_ref,
     capabilities: parseJson(row.capability_snapshot_json, {}),
     verificationCommands: parseJson(row.verification_commands_json, []),
+    workspaceBaseline: parseJson(row.workspace_baseline_json, null),
+    workspaceDiff: parseJson(row.workspace_diff_json, null),
     watchdogState: row.watchdog_state,
     error: row.error_code ? { code: row.error_code, message: row.error_message } : null,
     startedAt: row.started_at,
@@ -669,6 +671,16 @@ export class ControlPlaneStore {
     const projectColumns = new Set(this.db.prepare('PRAGMA table_info(projects)').all().map((column) => column.name));
     if (!projectColumns.has('pl_session_id')) {
       this.db.exec('ALTER TABLE projects ADD COLUMN pl_session_id TEXT');
+    }
+    // R2.1: capture the workspace baseline before a write Run and the observed
+    // diff afterwards, so Task scope compliance can be checked against actual
+    // filesystem changes rather than only Worker-reported artifacts.
+    const runColumns = new Set(this.db.prepare('PRAGMA table_info(task_runs)').all().map((column) => column.name));
+    if (!runColumns.has('workspace_baseline_json')) {
+      this.db.exec('ALTER TABLE task_runs ADD COLUMN workspace_baseline_json TEXT');
+    }
+    if (!runColumns.has('workspace_diff_json')) {
+      this.db.exec('ALTER TABLE task_runs ADD COLUMN workspace_diff_json TEXT');
     }
     // R1.3: migrations must never re-expand permissions that were previously
     // narrowed. Prune any permission outside the frozen role template; never

@@ -39,13 +39,18 @@ function patternMatches(path, pattern) {
 
 function inAllowedScope(root, relativePath, scope) {
   const path = relativePath.replaceAll('\\', '/');
-  const forbidden = (scope?.forbidden ?? [])
-    .map((pattern) => normalizeScopePattern(root, pattern)).filter(Boolean)
-    .some((pattern) => patternMatches(path, pattern));
-  const allowed = (scope?.allowed ?? [])
-    .map((pattern) => normalizeScopePattern(root, pattern)).filter(Boolean)
-    .some((pattern) => patternMatches(path, pattern));
+  const forbidden = pathMatchesScope(root, relativePath, scope?.forbidden ?? []);
+  const allowed = pathMatchesScope(root, relativePath, scope?.allowed ?? []);
   return allowed && !forbidden;
+}
+
+// Exported for R2 workspace-diff scope classification: tells whether a
+// workspace-relative path matches any allowed/forbidden pattern list.
+export function pathMatchesScope(root, relativePath, patterns) {
+  const path = relativePath.replaceAll('\\', '/');
+  return (patterns ?? [])
+    .map((pattern) => normalizeScopePattern(root, pattern)).filter(Boolean)
+    .some((pattern) => patternMatches(path, pattern));
 }
 
 async function sha256(path) {

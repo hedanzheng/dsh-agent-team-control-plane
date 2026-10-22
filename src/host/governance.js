@@ -1,4 +1,5 @@
 import { CHARTER_IMPACT, ControlPlaneError, id, json, now, requireActor, requireString, requireStringArray } from '../shared/contracts.js';
+import { diffWorkspace, snapshotWorkspace } from './workspace-diff.js';
 
 function actorKey(actor) { return `${actor.type}:${actor.id}`; }
 
@@ -9,11 +10,13 @@ function enumValue(value, field, allowed) {
 }
 
 export class CollaborationGovernance {
-  constructor({ store, controlPlane, adapters = null, logger = console }) {
+  constructor({ store, controlPlane, adapters = null, logger = console, workspaceSnapshooter = snapshotWorkspace, workspaceDiffer = diffWorkspace }) {
     this.store = store;
     this.controlPlane = controlPlane;
     this.adapters = adapters;
     this.logger = logger;
+    this.workspaceSnapshooter = workspaceSnapshooter;
+    this.workspaceDiffer = workspaceDiffer;
     this.requestJobs = new Map();
     this.reviewJobs = new Map();
   }
@@ -330,10 +333,10 @@ export class CollaborationGovernance {
     return true;
   }
 
-  verifyTask({ projectId, task, reviewId, actor, evidenceRefs, at }) {
+  verifyTask({ projectId, task, reviewId, actor, evidenceRefs, at, riskAccepted = false }) {
     this.store.db.prepare(`UPDATE tasks SET status='VERIFIED', waiting_reason=NULL, waiting_on_ref=NULL,
       checkpoint_ref=NULL, waiting_deadline=NULL, version=version+1, updated_at=? WHERE id=?`).run(at, task.id);
-    this.controlPlane.addTaskStateEvent({ taskId: task.id, fromStatus: task.status, toStatus: 'VERIFIED', actor, reason: `Approved by ${reviewId}`, evidenceRefs, at });
+    this.controlPlane.addTaskStateEvent({ taskId: task.id, fromStatus: task.status, toStatus: 'VERIFIED', actor, reason: riskAccepted ? `Approved by ${reviewId} with Human-accepted unverified risk` : `Approved by ${reviewId}`, evidenceRefs, at });
     this.controlPlane.refreshReadyTasks(projectId, at);
     this.maybeTriggerPlanCheck(projectId, 'VERIFIED_COUNT', at);
   }
@@ -406,6 +409,13 @@ export class CollaborationGovernance {
     const issues = requireStringArray(input.issues ?? [], 'issues', { max: 32, itemMax: 2000 });
     const evidenceRefs = requireStringArray(input.evidenceRefs ?? [], 'evidenceRefs', { min: 1, max: 32, itemMax: 1000 });
     if (decision === 'REJECT' && issues.length === 0) throw new ControlPlaneError('REVIEW_ISSUES_REQUIRED', 'Reject review requires at least one concrete issue', 409);
+    const result = this.store.getResult(task.resultId);
+    if (!result) throw new ControlPlaneError('RESULT_NOT_FOUND', 'Submitted Result is missing', 409);
+    // R2.2: review evidence references must exist and belong to the CURRENT Result.
+    const validEvidence = new Set(result.evidenceRefs);
+    if (evidenceRefs.some((ref) => !validEvidence.has(ref))) {
+      throw new ControlPlaneError('REVIEW_EVIDENCE_INVALID', 'Review referenced evidence outside the current Result', 409);
+    }
     let reviewerRole;
     let reviewerAgentId = null;
     if (actor.type === 'agent') {
@@ -422,6 +432,18 @@ export class CollaborationGovernance {
       if (!reviewerApproval) throw new ControlPlaneError('REVIEWER_APPROVAL_REQUIRED', 'Independent Reviewer approval is required before PL decision', 409);
     }
     if (task.reviewPolicy !== 'REVIEWER_PL' && reviewerRole === 'REVIEWER') throw new ControlPlaneError('PL_REVIEW_REQUIRED', 'This Task is routed to PL review', 409);
+    // R2.2: a Result with incomplete Host verification (PARTIAL outcome or any
+    // FAILED evidence) must not be VERIFIED by routine approval. Only the Human
+    // Owner may explicitly accept the unverified risk.
+    const failedEvidence = this.store.listEvidence(task.projectId).filter((item) => item.resultId === result.id && item.status === 'FAILED');
+    const hostVerificationIncomplete = result.outcome !== 'SUCCESS' || failedEvidence.length > 0;
+    let riskAccepted = false;
+    if (decision === 'APPROVE' && hostVerificationIncomplete) {
+      riskAccepted = actor.type === 'human' && actor.id === project.ownerId && input.acceptRisk === true;
+      if (!riskAccepted) {
+        throw new ControlPlaneError('VERIFICATION_INCOMPLETE', 'Host verification is incomplete (PARTIAL outcome or FAILED evidence); only the Human Owner may explicitly accept this risk', 409);
+      }
+    }
     const operationId = this.controlPlane.assertNewOperation(input.operationId);
     const reviewId = id('REVIEW');
     const at = now();
@@ -431,9 +453,9 @@ export class CollaborationGovernance {
         reviewId, task.id, task.resultId, reviewerAgentId, reviewerRole, decision, json(issues), json(evidenceRefs), at,
       );
       const finalApprove = decision === 'APPROVE' && (reviewerRole === 'PL' || task.reviewPolicy !== 'REVIEWER_PL');
-      if (finalApprove) this.verifyTask({ projectId: project.id, task, reviewId, actor, evidenceRefs, at });
+      if (finalApprove) this.verifyTask({ projectId: project.id, task, reviewId, actor, evidenceRefs, at, riskAccepted });
       if (decision === 'REJECT') this.returnForRework({ project, task, reviewId, actor, issues, evidenceRefs, at });
-      this.controlPlane.activity({ operationId, projectId: project.id, eventType: `REVIEW_${decision}`, actor, objectRef: reviewId, summary: `${reviewerRole} ${decision}${finalApprove ? '; Task VERIFIED' : decision === 'REJECT' ? '; Task returned for rework' : '; awaiting PL'}`, at });
+      this.controlPlane.activity({ operationId, projectId: project.id, eventType: `REVIEW_${decision}`, actor, objectRef: reviewId, summary: `${reviewerRole} ${decision}${finalApprove ? (riskAccepted ? '; Task VERIFIED with Human-accepted unverified risk' : '; Task VERIFIED') : decision === 'REJECT' ? '; Task returned for rework' : '; awaiting PL'}`, at });
     });
     return this.store.snapshot(project.id);
   }
@@ -463,6 +485,10 @@ export class CollaborationGovernance {
       ?? available.find((item) => item.providerKey === 'subagent:spawn')
       ?? available[0];
     if (!runtime) throw new ControlPlaneError('REVIEW_RUNTIME_UNAVAILABLE', 'No authorized one-shot runtime can execute an independent review', 409);
+    // R2.3: never let a Reviewer inspect the same workspace while a Worker write
+    // Run is active — it could read half-written state.
+    const activeWrite = this.store.db.prepare('SELECT run_id FROM workspace_locks WHERE workspace_ref=?').get(project.workspaceDir);
+    if (activeWrite) throw new ControlPlaneError('WORKSPACE_BUSY', `workspace has active write Run ${activeWrite.run_id}; independent review requires a stable snapshot`, 409);
     this.adapters.prepareWorkspace(project.workspaceDir, { create: false });
     this.adapters.assertCanStart({ providerKey: runtime.providerKey, projectId: project.id, parentAgent: input.parentAgent });
     const operationId = this.controlPlane.assertNewOperation(input.operationId);
@@ -488,6 +514,11 @@ export class CollaborationGovernance {
     let timeout;
     let timedOut = false;
     let runtimeStarted = false;
+    // R2.3: capture a baseline so unexpected Reviewer workspace writes can be
+    // detected after the Run. This is a post-hoc check and does NOT claim to
+    // enforce strong isolation — only to flag and refuse accidental mutation.
+    let baseline = null;
+    try { baseline = this.workspaceSnapshooter(project.workspaceDir); } catch { baseline = null; }
     try {
       const started = await this.adapters.startRun({
         runId: reviewRunId, taskId: task.id, agentId: reviewer.id, providerKey: runtime.providerKey,
@@ -502,6 +533,11 @@ export class CollaborationGovernance {
       if (runtimeResult.stopReason !== 'completed') {
         const status = timedOut ? 'TIMED_OUT' : runtimeResult.stopReason === 'aborted' ? 'CANCELLED' : 'UNKNOWN';
         await this.finishReviewRunFailure({ reviewRunId, project, reviewer, status, code: timedOut ? 'REVIEW_TIMEOUT' : 'REVIEW_RUNTIME_TERMINAL', message: `Runtime stop reason ${runtimeResult.stopReason}${runtimeResult.diagnostic ? `: ${runtimeResult.diagnostic}` : ''}` });
+        return;
+      }
+      const workspaceWrites = this.detectReviewerWrites(project, baseline);
+      if (workspaceWrites) {
+        await this.finishReviewRunFailure({ reviewRunId, project, reviewer, status: 'FAILED', code: 'REVIEW_WRITE_DETECTED', message: `Reviewer modified the workspace: ${workspaceWrites.join(', ')}` });
         return;
       }
       const parsed = this.parseReviewOutput(runtimeResult.output, result);
@@ -525,6 +561,17 @@ export class CollaborationGovernance {
       if (timeout) clearTimeout(timeout);
       this.adapters.disposeRun(reviewRunId);
     }
+  }
+
+  // R2.3: post-hoc detection of unexpected Reviewer writes. Returns the list of
+  // changed workspace paths, or null when the workspace is unchanged/unreadable.
+  detectReviewerWrites(project, baseline) {
+    if (!baseline) return null;
+    let after;
+    try { after = this.workspaceSnapshooter(project.workspaceDir); } catch { return null; }
+    const diff = this.workspaceDiffer(baseline, after);
+    const writes = [...diff.added, ...diff.modified, ...diff.deleted];
+    return writes.length > 0 ? writes : null;
   }
 
   async finishReviewRunFailure({ reviewRunId, project, reviewer, status, code, message }) {

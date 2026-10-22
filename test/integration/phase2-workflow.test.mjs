@@ -67,6 +67,31 @@ function taskInput(state, title, dependencies = []) {
   };
 }
 
+// R2.2: VERIFIED now requires a real SUCCESS Result with evidence that belongs
+// to it. Seed a fully-formed Result + Evidence + Run so the DAG transition below
+// exercises the genuine gate instead of a synthetic resultId string.
+function seedVerifiedResult(store, task) {
+  const project = store.getProject(task.projectId);
+  const worker = store.listAgents(task.projectId).find((agent) => agent.role === 'WORKER');
+  const runId = `RUN-${task.id}`;
+  const resultId = `RESULT-${task.id}`;
+  const evidenceId = `EVIDENCE-${task.id}`;
+  const at = new Date().toISOString();
+  store.db.prepare(`INSERT INTO task_runs(id, task_id, agent_id, provider_key, attempt, workspace_ref, write_intent,
+    status, terminal_kind, terminal_payload_ref, capability_snapshot_json, verification_commands_json, watchdog_state, created_at)
+    VALUES(?, ?, ?, ?, 1, ?, 0, 'SUCCEEDED', 'SUCCESS', ?, '{}', '[]', 'TERMINAL', ?)`).run(
+    runId, task.id, worker.id, worker.providerKey, project.workspaceDir, resultId, at,
+  );
+  store.db.prepare(`INSERT INTO results(id, task_id, run_id, outcome, change_summary, artifacts_json, verified_actions_json,
+    test_plan, risks_json, unresolved_json, findings_json, evidence_refs_json, checkpoint_json, request_proposal_json, raw_output_excerpt, created_at)
+    VALUES(?, ?, ?, 'SUCCESS', 'seeded result', '[]', '[]', '', '[]', '[]', '[]', ?, NULL, NULL, '', ?)`).run(
+    resultId, task.id, runId, JSON.stringify([evidenceId]), at,
+  );
+  store.db.prepare(`INSERT INTO evidence(id, result_id, kind, ref, status, details_json, created_at)
+    VALUES(?, ?, 'FILE', ?, 'VERIFIED', '{}', ?)`).run(evidenceId, resultId, evidenceId, at);
+  return { resultId, evidenceId };
+}
+
 test('Phase 2 Task DAG, assignment, state, concurrency, proposal, and persistence', async () => {
   const root = mkdtempSync(join(tmpdir(), 'agent-team-phase2-'));
   const database = join(root, 'control-plane.sqlite');
@@ -157,15 +182,16 @@ test('Phase 2 Task DAG, assignment, state, concurrency, proposal, and persistenc
       taskId: taskA.id, expectedVersion: readyA.version, toStatus: 'RUNNING',
     });
     runningA = state.selected.tasks.find((task) => task.id === taskA.id);
+    const seedA = seedVerifiedResult(store, taskA);
     state = plane.transitionTask({
       actor: { type: 'agent', id: worker.id }, operationId: operation('a-submit'), projectId,
       taskId: taskA.id, expectedVersion: runningA.version, toStatus: 'SUBMITTED',
-      resultId: 'RESULT-PHASE2-A', evidenceRefs: ['TEST-EVIDENCE-A'],
+      resultId: seedA.resultId, evidenceRefs: [seedA.evidenceId],
     });
     let submittedA = state.selected.tasks.find((task) => task.id === taskA.id);
     state = plane.transitionTask({
       actor: pl, operationId: operation('a-verify'), projectId, taskId: taskA.id,
-      expectedVersion: submittedA.version, toStatus: 'VERIFIED', evidenceRefs: ['PL-REVIEW-A'],
+      expectedVersion: submittedA.version, toStatus: 'VERIFIED', evidenceRefs: [seedA.evidenceId],
     });
     taskC = state.selected.tasks.find((task) => task.id === taskC.id);
     assert.equal(taskC.status, 'PENDING', 'C remains blocked until both A and B are VERIFIED');
@@ -175,13 +201,14 @@ test('Phase 2 Task DAG, assignment, state, concurrency, proposal, and persistenc
     currentB = state.selected.tasks.find((task) => task.id === taskB.id);
     state = plane.transitionTask({ actor: { type: 'agent', id: worker.id }, operationId: operation('b-run'), projectId, taskId: taskB.id, expectedVersion: currentB.version, toStatus: 'RUNNING' });
     currentB = state.selected.tasks.find((task) => task.id === taskB.id);
+    const seedB = seedVerifiedResult(store, taskB);
     state = plane.transitionTask({
       actor: { type: 'agent', id: worker.id }, operationId: operation('b-submit'), projectId,
       taskId: taskB.id, expectedVersion: currentB.version, toStatus: 'SUBMITTED',
-      resultId: 'RESULT-PHASE2-B', evidenceRefs: ['TEST-EVIDENCE-B'],
+      resultId: seedB.resultId, evidenceRefs: [seedB.evidenceId],
     });
     currentB = state.selected.tasks.find((task) => task.id === taskB.id);
-    state = plane.transitionTask({ actor: pl, operationId: operation('b-verify'), projectId, taskId: taskB.id, expectedVersion: currentB.version, toStatus: 'VERIFIED', evidenceRefs: ['PL-REVIEW-B'] });
+    state = plane.transitionTask({ actor: pl, operationId: operation('b-verify'), projectId, taskId: taskB.id, expectedVersion: currentB.version, toStatus: 'VERIFIED', evidenceRefs: [seedB.evidenceId] });
     taskC = state.selected.tasks.find((task) => task.id === taskC.id);
     assert.equal(taskC.status, 'READY');
 
