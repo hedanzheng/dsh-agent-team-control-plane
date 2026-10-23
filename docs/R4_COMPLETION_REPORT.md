@@ -1,14 +1,16 @@
 # R4 完成报告
 
 ## 环境
-- Git SHA / Branch：`main` @ `d867e42`（R3 完成提交；R4 为验收阶段，无代码改动）
+- Git SHA / Branch：`main` @ `454b001`（R3 完成 + R4 复盘修复）
 - DeepSeek Harness 版本：Electron `44.7.0`（DSH Desktop `0.2.x`）
 - Node / OS：Node `22.22.2` / Windows NT 10.0.26200
-- 插件部署方式：`github:hedanzheng/dsh-agent-team-control-plane`（本次因本机代理 7897 关闭，改用本地仓库 `d867e42` 源码直接覆盖部署到 `profiles/desktop/node_modules/@local/agent-team-control-plane`，部署前已备份）
+- 插件部署方式：`pnpm add github:hedanzheng/dsh-agent-team-control-plane#454b001`（经 127.0.0.1:7897 代理），`pnpm-lock.yaml` 已锁定到 `454b001`
 
 ## 修改范围
-- 本阶段为**验收阶段**，不新增代码改动；仅执行部署与环境核查。
-- 部署文件：`src/**`、`client.js`、`package.json`（覆盖为 `d867e42` 内容）。
+- 本阶段以**验收为主**，Human 真机复盘后发现 2 处面板缺陷，已追加修复并重新部署：
+  1. `client.js`：治理面板 5 个按钮补传 `projectId`（`submit-review` / `respond-request` / `request-review` / `update-finding` / `complete-plan-check`）。
+  2. `src/host/pl-bridge.js`：`agent_team_create_task` 对错误别名 `dependencies` 显式拒绝，避免静默丢失依赖边。
+- 部署文件：`src/**`、`client.js`、`package.json`（最终锁定 `454b001`）。
 
 ## 验收证据（成功 / 失败 / 不支持 / 未知 分开标注）
 
@@ -56,8 +58,8 @@ Harness 进程可启动（PID 存活、插件 apply 执行、数据库访问成�
 1. **遗留（小）**：插件卸载重装、SQLite 备份恢复的实机回归未执行（R4 步骤 7 的剩余部分）。
 2. **外部 Worker 后端不可用**：Codex/Claude 未注册为 subagent provider；真实 Worker Run 由 `spawn`/`fork`（Harness 进程内子 Agent）完成。如需外部后端，属宿主配置，超出本仓库范围。
 3. **PL 模型 ↔ Session 一致性**：仍依赖宿主，代码无法断言（R3 已记录）。
-4. **回滚方式**：部署备份在 `profiles/desktop/backups/atcp-before-r4-local-20261022-213842`；待代理恢复后建议 `pnpm add github:...` 使 lock 对齐最新提交（当前 lock 仍指向 `d705504`）。
-5. **面板 Finding 收尾**：修复部署并重启 Harness 后，Human 可在"审批"页逐条关闭 13 条 OPEN Finding，再点"验收并完成 Project"。
+4. **回滚方式**：部署备份在 `profiles/desktop/backups/atcp-before-r4-local-20261022-213842`；当前 `pnpm-lock.yaml` 已对齐最新提交 `454b001`。
+5. **面板 Finding 收尾（R4 最后一步）**：修复已部署，重启 Harness 后，Human 需在"审批"页逐条关闭 13 条 OPEN Finding，再点"验收并完成 Project"，项目状态即从 `ACTIVE` 变为 `COMPLETED`。
 
 ## 附：Human 真机验收操作清单（不含敏感数据）
 1. 打开 DeepSeek Harness 桌面端，进入"Agent 团队"面板。
@@ -68,6 +70,22 @@ Harness 进程可启动（PID 存活、插件 apply 执行、数据库访问成�
 6. 停止 Project 后再触发一次 review，确认不会复活 Task（R3.2）。
 7. 记录各 Task/Run/Evidence/Review ID 与验证命令退出码，回填本报告后即为完整 R4 真机回归。
 
+## 如何补齐 R4 验收状态（最终操作清单）
+R4 功能与流程已由 Human 在真机全部验证通过；当前唯一未闭环的是**项目状态收尾**。请按以下顺序操作：
+
+1. **启动 Harness**：双击 `D:\DeepSeekHarness\DeepSeek Harness.exe`，确认插件加载后 Control Plane Panel 可正常进入。
+2. **打开 Project**：在面板中找到 `PROJECT-CC8390A3`（或你当前用于验收的 Project）。
+3. **关闭 13 条 OPEN Finding**：
+   - 进入"审批"页 / Findings 列表。
+   - 对每条 `OPEN` Finding 点击「关闭 / Close Finding」（`update-finding` 已修复，会正确传 `projectId`）。
+   - 关闭后状态应变更为 `CLOSED`。
+4. **完成 Project**：回到 Project 概览，点击「验收并完成 Project」。
+   - 若 13 条 Finding 已全部关闭，`completeProject` 校验通过，项目状态从 `ACTIVE` 变为 `COMPLETED`。
+   - 若仍有 Finding 未关，会收到 `OPEN_FINDING_EXISTS` 提示，返回第 3 步。
+5. **验收结论回填**：完成以上步骤后，本报告即视为完整；可在本报告末尾追加一行：
+   > `COMPLETED 状态确认：PROJECT-CC8390A3 于 <日期> 由 Human 手动完成，13 条 Finding 已关闭。`
+
 ## 下一阶段建议
-- 是否满足本阶段验收：**YES（含少量遗留）** —— Human 已在真机完成创建→PL→Worker Run→独立 Review→门禁拦截→停止/恢复全流程（见上表）；遗留项仅为插件卸载重装与 SQLite 备份恢复的实机回归，不阻塞 R5。
-- 建议接下来：进入 **R5**（六页签总览改造）；治理面板按钮修复已包含在待部署提交中。
+- 是否满足本阶段验收：**YES（含少量遗留）** —— Human 已在真机完成创建→PL→Worker Run→独立 Review→门禁拦截→停止/恢复全流程（见上表）；治理面板按钮修复已部署；待 Human 完成上述 5 步状态收尾后，R4 正式闭环。
+- 遗留项：插件卸载重装与 SQLite 备份恢复的实机回归未执行，不阻塞 R5。
+- 建议接下来：进入 **R5**（六页签总览改造）。
