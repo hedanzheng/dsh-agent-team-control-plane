@@ -1,9 +1,10 @@
 # R5 完成报告
 
 ## 环境
-- Git SHA / Branch：`main`（基于 `eb55dfc`，本次改动待提交）
+- Git SHA / Branch：`main` @ `b7dc207`
 - DeepSeek Harness 版本：`0.2.x`（Electron `44.7.0`）
 - Node / OS：Node `22.22.2` / Windows NT 10.0.26200
+- 插件部署：`pnpm add github:hedanzheng/dsh-agent-team-control-plane#b7dc207` 已执行，`pnpm-lock.yaml` 锁定 `b7dc207`，部署副本 `client.js` 含 `view-dashboard`；重启 Harness 后生效。
 
 ## 修改范围（六页签总览改造）
 仅前端面板，未触碰 Host 逻辑、数据库 schema、权限边界与 R0–R4 语义。
