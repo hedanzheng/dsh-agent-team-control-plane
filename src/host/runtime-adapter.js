@@ -91,6 +91,10 @@ export class RuntimeAdapterRegistry {
     return parent;
   }
 
+  forgetProjectParent(projectId) {
+    return this.projectParents.delete(projectId);
+  }
+
   resolveProjectParent(projectId, suppliedParent) {
     if (this.isLiveParent(suppliedParent)) return suppliedParent;
     const bound = projectId ? this.projectParents.get(projectId) : null;

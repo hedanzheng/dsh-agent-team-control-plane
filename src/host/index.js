@@ -69,6 +69,7 @@ export async function apply(ctx) {
     controlPlane,
     coordinator,
     governance,
+    adapters,
     connection: ctx.connection,
     logger: ctx.logger,
   });

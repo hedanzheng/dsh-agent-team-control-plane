@@ -7,25 +7,28 @@
 ## 兼容性
 
 - 已验证 Host：DeepSeek Harness Desktop `0.2.1-rc.2`
-- 包：`@local/agent-team-control-plane@0.5.7`
+- 包：`@local/agent-team-control-plane@0.6.0`
 - Runtime：已验证 Host 内置 Node.js，要求支持 `node:sqlite`
 - 已验证平台：Windows Desktop / PowerShell 5.1+
 
 ## 方案 A 能力
 
 - 左侧栏提供 **Agent 团队** 入口，打开中央独立全页控制台，不再覆盖当前对话
-- 控制台六个页签：**PL 对话**、**Project**、**Agents**、**Tasks**、**Approvals**、**Activity**
-- PL 工作台会解释职责、显示当前阶段与下一步，并打开已注入 Project 上下文的独立 PL 对话
+- 控制台固定六个页签：**总览**、**项目**、**团队**、**任务**、**审批**、**活动**
+- 创建 Project 时只创建并绑定一次 PL 对话；日常切换使用 Harness 左侧栏，控制台只在初次创建失败时提供恢复入口
 - 已停止 Project 可以恢复；已停止/已完成项目的 Task、Run、Result、Evidence 与治理历史仍可只读查看
-- 创建项目时可选择 3–8 个 Agent（`1 PL + N Worker + 1 Reviewer`），并可明确选择 Task 指派给哪个空闲 Worker
+- 非运行中的 Project 可以永久删除控制面记录；删除不会触碰工作目录或 Harness PL 对话，并要求版本及 Project ID 双重确认
+- 创建项目时可选择 3–8 个 Agent（`1 PL + N Worker + 1 Reviewer`），可选并持久化 Worker Runtime（默认自动选择），并可明确选择 Task 指派给哪个空闲 Worker
 - Runtime 分为 PL 模型来源与 Worker 启动方式，明确 `fork`/`spawn` 不是模型名称
-- Project 状态和 Activity 主信息中文化，原始不可变审计记录收纳在“技术审计原文”中
+- Runtime 失败后保留终态与诊断信息，由 Project PL 分析修复，不自动盲目重跑；只有 Host 提供可信数据时才显示 Token/成本，不估算订阅制本地模型费用
+- Project 状态和 Activity 主信息中文化；Activity 按 Project 服务端分页（默认 50 条），支持 Agent、事件类型和可靠 Task 关联筛选
+- Decision 位于“项目→项目决策记录”，不再混在审批队列；重大 Charter 影响仍由 Human Owner 确认
 - PL 对话通过七个 Host-backed `agent_team_*` 工具读取与更新真实控制面状态，并可派发真实的独立 Reviewer Run
 - PL 只负责访谈、计划、编排与 Review；实现工作必须创建正式 Task、指派 Worker 并启动 one-shot Run
 - Host/SQLite 统一持久化 Charter、Agent、Task、Run、Result、Evidence、Request、Response、Review、Finding、Plan Check、Decision 与 Activity
 - 通过 DSH 托管 subagent activation 启动 Worker（本地 `fork`/`spawn` 或外部 provider），以 Checkpoint + 新 Run 恢复工作
 - 治理下限：`ROUTINE → AUTO`、`IMPORTANT → PL`、`CRITICAL → REVIEWER_PL`
-- Host 独立计算工件哈希、统一绝对/相对 scope，并以 UTF-8 执行有界验证命令
+- Host 独立计算工件哈希、拒绝符号链接/junction 逃逸、统一绝对/相对 scope，并以 UTF-8 执行有界验证命令
 - Human 最终验收后把成功项目记录为 `COMPLETED`，与中止语义 `STOPPED` 分离
 - 乐观版本检查、operation ID、Request 预算、循环检测与 workspace 写锁
 - Host 重启、插件升级和卸载后仍保留历史数据
@@ -42,7 +45,7 @@ dsh plugin add github:hedanzheng/dsh-agent-team-control-plane
 
 ```powershell
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.5.7.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.6.0.tgz' --offline
 ```
 
 插件通过 `cordis.patch.yml` 激活。安装完成后重启目标 Harness Profile。

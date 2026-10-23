@@ -240,6 +240,25 @@ test('Phase 2 Task DAG, assignment, state, concurrency, proposal, and persistenc
     assert.ok(restored.taskStateEvents.length >= 10);
     assert.equal(restored.taskProposals.find((item) => item.id === proposal.id).status, 'ACCEPTED');
     assert.equal(counters.modelStarts, 0);
+
+    let deleted = plane.stopProject({
+      actor: OWNER, operationId: operation('stop-rich-project'), projectId,
+      expectedVersion: restored.project.version, reason: 'Exercise cascading project deletion',
+    });
+    deleted = plane.deleteProject({
+      actor: OWNER, operationId: operation('delete-rich-project'), projectId,
+      expectedVersion: deleted.selected.project.version, confirmation: projectId,
+    });
+    assert.equal(deleted.selected, null);
+    for (const table of [
+      'projects', 'project_interviews', 'charters', 'agents', 'approvals', 'tasks',
+      'task_dependencies', 'task_proposals', 'task_state_events', 'task_runs',
+      'task_run_events', 'results', 'evidence',
+    ]) {
+      assert.equal(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0, `${table} must have no project-owned rows`);
+    }
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM activities WHERE project_id=?').get(projectId).n, 0);
+    assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(), []);
   } finally {
     if (store) store.close();
     rmSync(root, { recursive: true, force: true });

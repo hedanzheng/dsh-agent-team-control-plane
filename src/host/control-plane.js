@@ -13,6 +13,7 @@ import {
   requireString,
   requireStringArray,
 } from '../shared/contracts.js';
+import { isAbsolute, resolve } from 'node:path';
 
 const REVIEW_RANK = Object.freeze({ AUTO: 0, PL: 1, REVIEWER_PL: 2 });
 const MINIMUM_REVIEW = Object.freeze({ ROUTINE: 'AUTO', IMPORTANT: 'PL', CRITICAL: 'REVIEWER_PL' });
@@ -159,9 +160,30 @@ export class AgentTeamControlPlane {
     if (leadRuntime.kind !== 'harness-agent') {
       throw new ControlPlaneError('INVALID_PL_RUNTIME', 'Project Lead must use a Harness Agent runtime in MVP v0.1', 409);
     }
+    const requestedWorkerRuntimeKey = typeof input.workerRuntimeKey === 'string'
+      ? input.workerRuntimeKey.trim()
+      : '';
+    const workerRuntime = requestedWorkerRuntimeKey
+      ? this.requireUsableAuthorizedRuntime(requestedWorkerRuntimeKey)
+      : this.firstUsableAuthorizedRuntime('external-worker');
+    if (!workerRuntime) {
+      throw new ControlPlaneError(
+        'RUNTIME_UNAVAILABLE',
+        'authorize an AVAILABLE external-worker runtime before creating the Project',
+        409,
+      );
+    }
+    if (workerRuntime.kind !== 'external-worker') {
+      throw new ControlPlaneError('INVALID_WORKER_RUNTIME', 'Worker must use an external-worker runtime', 409);
+    }
     const projectId = id('PROJECT');
     const leadAgentId = id('AGENT-PL');
     const at = now();
+    const workspaceInput = requireString(input.workspaceDir, 'workspaceDir', { max: 2000 });
+    if (!isAbsolute(workspaceInput)) {
+      throw new ControlPlaneError('INVALID_WORKSPACE', 'workspaceDir must be an absolute path');
+    }
+    const workspaceDir = resolve(workspaceInput);
     // A usable team always contains one PL, at least one Worker, and one Reviewer.
     // `maxAgents` is selected by the Human during Project creation and becomes the
     // size of the initial team proposal (additional slots are Workers).
@@ -171,15 +193,16 @@ export class AgentTeamControlPlane {
     const interviewMode = skillDiscovery.grillMeAvailable ? 'grill-me' : 'fallback';
     this.store.transaction(() => {
       this.store.db.prepare(`INSERT INTO projects(
-        id, name, owner_id, lead_agent_id, lead_runtime_key, workspace_dir, initial_goal,
+        id, name, owner_id, lead_agent_id, lead_runtime_key, worker_runtime_key, workspace_dir, initial_goal,
         charter_version, max_agents, replan_every_n, status, version, created_at, updated_at
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'CHARTER_INTERVIEW', 1, ?, ?)`).run(
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 'CHARTER_INTERVIEW', 1, ?, ?)`).run(
         projectId,
         requireString(input.name, 'name', { max: 200 }),
         ownerId,
         leadAgentId,
         leadRuntime.providerKey,
-        requireString(input.workspaceDir, 'workspaceDir', { max: 2000 }),
+        workerRuntime.providerKey,
+        workspaceDir,
         requireString(input.initialGoal, 'initialGoal', { max: 5000 }),
         maxAgents,
         replanEveryN,
@@ -197,7 +220,15 @@ export class AgentTeamControlPlane {
       );
       this.store.db.prepare(`INSERT INTO project_interviews(project_id, mode, questions_json, answers_json, status, updated_at)
         VALUES(?, ?, ?, '{}', 'OPEN', ?)`).run(projectId, interviewMode, json(FALLBACK_INTERVIEW), at);
-      this.activity({ operationId: op, projectId, eventType: 'PROJECT_CREATED', actor: who, objectRef: projectId, summary: `Project created; ${interviewMode} interview opened`, at });
+      this.activity({
+        operationId: op,
+        projectId,
+        eventType: 'PROJECT_CREATED',
+        actor: who,
+        objectRef: projectId,
+        summary: `Project created with PL runtime ${leadRuntime.providerKey} and Worker runtime ${workerRuntime.providerKey}; ${interviewMode} interview opened`,
+        at,
+      });
     });
     return this.store.snapshot(projectId);
   }
@@ -273,13 +304,18 @@ export class AgentTeamControlPlane {
     const op = this.assertNewOperation(input.operationId);
     const at = now();
     const teamApprovalId = id('APPROVAL');
-    const external = this.firstUsableAuthorizedRuntime('external-worker');
+    const external = project.workerRuntimeKey
+      ? this.requireUsableAuthorizedRuntime(project.workerRuntimeKey)
+      : this.firstUsableAuthorizedRuntime('external-worker');
     if (!external) {
       throw new ControlPlaneError(
         'RUNTIME_UNAVAILABLE',
         'authorize an AVAILABLE external-worker runtime before approving the Charter',
         409,
       );
+    }
+    if (external.kind !== 'external-worker') {
+      throw new ControlPlaneError('INVALID_WORKER_RUNTIME', 'Project Worker runtime must be an external-worker runtime', 409);
     }
     const reviewerRuntime = this.store.listRuntimes().find((runtime) => runtime.providerKey === 'subagent:spawn'
       && runtime.kind === 'external-worker' && runtime.availability === 'AVAILABLE' && runtime.authorized) ?? external;
@@ -311,7 +347,8 @@ export class AgentTeamControlPlane {
     this.store.transaction(() => {
       this.store.db.prepare("UPDATE charters SET status='APPROVED', approved_at=? WHERE id=?").run(at, charter.id);
       this.store.db.prepare("UPDATE approvals SET status='APPROVED', decided_by=?, decided_at=? WHERE id=?").run(actorKey(who), at, approval.id);
-      this.store.db.prepare(`UPDATE projects SET charter_version=?, status='TEAM_PENDING_APPROVAL', version=version+1, updated_at=? WHERE id=?`).run(charter.version, at, project.id);
+      this.store.db.prepare(`UPDATE projects SET charter_version=?, worker_runtime_key=?, status='TEAM_PENDING_APPROVAL', version=version+1, updated_at=? WHERE id=?`)
+        .run(charter.version, external.providerKey, at, project.id);
       this.store.db.prepare(`INSERT INTO approvals(id, project_id, kind, status, payload_json, requested_by, created_at)
         VALUES(?, ?, 'TEAM', 'PENDING', ?, ?, ?)`).run(teamApprovalId, project.id, json({ members }), project.leadAgentId, at);
       this.activity({ operationId: op, projectId: project.id, eventType: 'CHARTER_APPROVED', actor: who, objectRef: charter.id, summary: `Human approved Charter v${charter.version}; PL proposed a ${members.length}-agent team`, at });
@@ -320,21 +357,26 @@ export class AgentTeamControlPlane {
   }
 
   normalizeTeam(project, members) {
-    if (!Array.isArray(members) || members.length < 1) throw new ControlPlaneError('INVALID_TEAM', 'team must contain at least one member');
+    if (!Array.isArray(members) || members.length < 3) throw new ControlPlaneError('INVALID_TEAM', 'team must contain one Project Lead, at least one Worker, and one Reviewer');
     if (members.length > project.maxAgents) {
       throw new ControlPlaneError('AGENT_LIMIT_EXCEEDED', `team size ${members.length} exceeds maxAgents ${project.maxAgents}`, 409);
     }
     const seenIds = new Set();
-    const roles = new Set();
-    return members.map((member, index) => {
+    const normalized = members.map((member, index) => {
       const role = requireString(member.role, `members[${index}].role`, { max: 32 });
       if (!DEFAULT_ROLE_PERMISSIONS[role]) throw new ControlPlaneError('INVALID_ROLE', `unsupported role ${role}`);
       const memberId = requireString(member.id, `members[${index}].id`, { max: 128 });
       if (seenIds.has(memberId)) throw new ControlPlaneError('INVALID_TEAM', `duplicate agent id ${memberId}`);
       seenIds.add(memberId);
-      roles.add(role);
       const runtime = this.requireUsableAuthorizedRuntime(member.providerKey);
-      if (role === 'PROJECT_LEAD' && memberId !== project.leadAgentId) throw new ControlPlaneError('INVALID_TEAM', 'team must retain the assigned Project Lead');
+      if (role === 'PROJECT_LEAD') {
+        if (memberId !== project.leadAgentId) throw new ControlPlaneError('INVALID_TEAM', 'team must retain the assigned Project Lead');
+        if (runtime.kind !== 'harness-agent' || runtime.providerKey !== project.leadRuntimeKey) {
+          throw new ControlPlaneError('INVALID_TEAM_RUNTIME', 'Project Lead must retain the Project Harness runtime', 409);
+        }
+      } else if (runtime.kind !== 'external-worker') {
+        throw new ControlPlaneError('INVALID_TEAM_RUNTIME', `${role} must use an external-worker runtime`, 409);
+      }
       // R1.3: permissions are validated as a subset of the frozen role template.
       // Callers (PL or Panel) cannot introduce arbitrary permission strings, and
       // skills never contribute permissions.
@@ -353,11 +395,11 @@ export class AgentTeamControlPlane {
         skills: requireStringArray(member.skills ?? [], `members[${index}].skills`, { max: 16 }),
         replacesAgentId: member.replacesAgentId ? requireString(member.replacesAgentId, `members[${index}].replacesAgentId`, { max: 128 }) : null,
       };
-    }).map((member, _index, normalized) => {
-      if (!roles.has('PROJECT_LEAD')) throw new ControlPlaneError('INVALID_TEAM', 'team requires one Project Lead');
-      if (normalized.filter((item) => item.role === 'PROJECT_LEAD').length !== 1) throw new ControlPlaneError('INVALID_TEAM', 'team requires exactly one Project Lead');
-      return member;
     });
+    if (normalized.filter((item) => item.role === 'PROJECT_LEAD').length !== 1) throw new ControlPlaneError('INVALID_TEAM', 'team requires exactly one Project Lead');
+    if (normalized.filter((item) => item.role === 'WORKER').length < 1) throw new ControlPlaneError('INVALID_TEAM', 'team requires at least one Worker');
+    if (normalized.filter((item) => item.role === 'REVIEWER').length !== 1) throw new ControlPlaneError('INVALID_TEAM', 'team requires exactly one Reviewer');
+    return normalized;
   }
 
   proposeTeam(input) {
@@ -413,7 +455,10 @@ export class AgentTeamControlPlane {
       }
       this.store.db.prepare("UPDATE approvals SET status='APPROVED', payload_json=?, decided_by=?, decided_at=? WHERE id=?")
         .run(json({ ...approval.payload, members }), actorKey(who), at, approval.id);
-      this.store.db.prepare("UPDATE projects SET status='ACTIVE', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
+      const effectiveWorkerRuntimeKey = members.find((member) => member.role === 'WORKER')?.providerKey
+        ?? project.workerRuntimeKey;
+      this.store.db.prepare("UPDATE projects SET status='ACTIVE', worker_runtime_key=?, version=version+1, updated_at=? WHERE id=?")
+        .run(effectiveWorkerRuntimeKey, at, project.id);
       const repairSummary = repaired.changed ? `; stale Worker/Reviewer runtime rebound to ${repaired.replacement.providerKey}` : '';
       this.activity({ operationId: op, projectId: project.id, eventType: 'TEAM_APPROVED', actor: who, objectRef: approval.id, summary: `Human approved ${members.length} Agent Record(s); all are idle and no runtime was started${repairSummary}`, at });
     });
@@ -430,6 +475,9 @@ export class AgentTeamControlPlane {
     if (replaced.status !== 'IDLE' || replaced.currentTaskId) throw new ControlPlaneError('AGENT_OCCUPIED', 'only an idle Agent without a Task may be replaced', 409);
     const providerKey = input.providerKey ?? replaced.providerKey;
     const runtime = this.requireUsableAuthorizedRuntime(providerKey);
+    if (runtime.kind !== 'external-worker') {
+      throw new ControlPlaneError('INVALID_TEAM_RUNTIME', `${replaced.role} replacement must use an external-worker runtime`, 409);
+    }
     const op = this.assertNewOperation(input.operationId);
     const replacementId = id(`AGENT-${replaced.role === 'REVIEWER' ? 'REVIEWER' : 'WORKER'}`);
     const displayName = input.displayName
@@ -541,6 +589,8 @@ export class AgentTeamControlPlane {
     if (activeRun) throw new ControlPlaneError('ACTIVE_RUN_EXISTS', `Task Run ${activeRun.id} is still active`, 409);
     const activeReview = this.store.listReviewRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
     if (activeReview) throw new ControlPlaneError('ACTIVE_REVIEW_RUN_EXISTS', `Review Run ${activeReview.id} is still active`, 409);
+    const activeRequestRun = this.store.listRequestRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
+    if (activeRequestRun) throw new ControlPlaneError('ACTIVE_REQUEST_RUN_EXISTS', `Request Run ${activeRequestRun.id} is still active`, 409);
     const openRequest = this.store.listRequests(project.id).find((request) => ['PENDING', 'IN_PROGRESS'].includes(request.status));
     if (openRequest) throw new ControlPlaneError('OPEN_REQUEST_EXISTS', `Request ${openRequest.id} must be resolved before Project completion`, 409);
     const pendingProposal = this.store.listTaskProposals(project.id).find((proposal) => proposal.status === 'PENDING');
@@ -557,6 +607,51 @@ export class AgentTeamControlPlane {
       this.activity({ operationId: op, projectId: project.id, eventType: 'PROJECT_COMPLETED', actor: who, objectRef: project.id, summary: `Human accepted Project completion with ${scopedTasks.length} VERIFIED Task(s)`, at });
     });
     return this.store.snapshot(project.id);
+  }
+
+  deleteProject(input) {
+    const project = this.requireProject(input.projectId);
+    const who = this.assertHumanOwner(project, input.actor);
+    assertExpectedVersion(project, input.expectedVersion);
+    if (project.status === 'ACTIVE') {
+      throw new ControlPlaneError('PROJECT_MUST_BE_STOPPED', 'stop the ACTIVE project before deleting it', 409);
+    }
+    const confirmation = requireString(input.confirmation, 'confirmation', { max: 128 });
+    if (confirmation !== project.id) {
+      throw new ControlPlaneError('DELETE_CONFIRMATION_MISMATCH', 'confirmation must exactly match the Project ID', 409);
+    }
+    const activeRun = this.store.listTaskRuns(project.id).find((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
+    if (activeRun) throw new ControlPlaneError('ACTIVE_RUN_EXISTS', `Task Run ${activeRun.id} is still active`, 409);
+    const activeReview = this.store.listReviewRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
+    if (activeReview) throw new ControlPlaneError('ACTIVE_REVIEW_RUN_EXISTS', `Review Run ${activeReview.id} is still active`, 409);
+    const activeRequestRun = this.store.listRequestRuns(project.id).find((run) => ['STARTING', 'RUNNING'].includes(run.status));
+    if (activeRequestRun) throw new ControlPlaneError('ACTIVE_REQUEST_RUN_EXISTS', `Request Run ${activeRequestRun.id} is still active`, 409);
+    const op = this.assertNewOperation(input.operationId);
+    const at = now();
+    this.store.transaction(() => {
+      const outcome = this.store.deleteProject(project.id);
+      if (outcome.changes !== 1) throw new ControlPlaneError('PROJECT_NOT_FOUND', 'project does not exist', 404);
+      // Keep only a minimal global tombstone for replay protection and audit.
+      // Workspace files and the Harness conversation are intentionally outside
+      // the Control Plane database and are never removed by this operation.
+      this.activity({
+        operationId: op,
+        eventType: 'PROJECT_DELETED',
+        actor: who,
+        objectRef: project.id,
+        summary: `Project record deleted; workspace ${project.workspaceDir} and PL conversation were not modified`,
+        at,
+      });
+    });
+    return {
+      ...this.store.snapshot(),
+      deletedProject: {
+        id: project.id,
+        name: project.name,
+        workspaceDir: project.workspaceDir,
+        plSessionId: project.plSessionId,
+      },
+    };
   }
 
   assertTaskPlanner(project, actor) {
@@ -980,6 +1075,23 @@ export class AgentTeamControlPlane {
       if (record.status !== 'APPROVED') throw new ControlPlaneError('VERIFICATION_COMMAND_NOT_APPROVED', `verification command ${commandId} is ${record.status}`, 403);
       return { command: record.command, timeoutMs: record.timeoutMs };
     });
+  }
+
+  activityPage(input) {
+    const project = this.requireProject(input.projectId);
+    const cursor = input.cursor?.createdAt && input.cursor?.id ? {
+      createdAt: requireString(input.cursor.createdAt, 'cursor.createdAt', { max: 64 }),
+      id: requireString(input.cursor.id, 'cursor.id', { max: 128 }),
+    } : null;
+    const result = this.store.listActivityPage({
+      projectId: project.id,
+      limit: Math.max(1, Math.min(100, Number(input.limit) || 50)),
+      cursor,
+      actorId: input.actorId ? requireString(input.actorId, 'actorId', { max: 128 }) : '',
+      eventType: input.eventType ? requireString(input.eventType, 'eventType', { max: 128 }) : '',
+      taskId: input.taskId ? requireString(input.taskId, 'taskId', { max: 128 }) : '',
+    });
+    return { ...result, facets: this.store.activityFacets(project.id) };
   }
 
   snapshot(projectId) {

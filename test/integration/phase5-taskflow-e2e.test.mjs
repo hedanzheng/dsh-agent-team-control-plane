@@ -274,15 +274,27 @@ test('stopping a WAITING Task rejects its open Request and resume never revives 
 
 test('Phase 5 client exposes all six Host-backed views without credential or chain-of-thought access', () => {
   const source = readFileSync(resolve('client.js'), 'utf8');
-  for (const testId of ['view-pl-chat', 'view-project', 'view-agents', 'view-tasks', 'view-approvals', 'view-activity']) {
+  for (const testId of ['view-dashboard', 'view-project', 'view-agents', 'view-tasks', 'view-approvals', 'view-activity']) {
     assert.match(source, new RegExp(`data-testid': '${testId}`));
   }
-  // R5: dashboard overview is the landing view; the six original views stay.
-  assert.match(source, /data-testid': 'view-dashboard/);
+  // R5: Dashboard replaces the old PL workbench; there are exactly six tabs.
+  const tabBlock = source.match(/const tabs = \[([\s\S]*?)\n\s*\];/)?.[1] || '';
+  assert.deepEqual([...tabBlock.matchAll(/\['([^']+)',\s*'([^']+)'\]/g)].map((match) => match.slice(1)), [
+    ['dashboard', '总览'], ['project', '项目'], ['agents', '团队'],
+    ['tasks', '任务'], ['approvals', '审批'], ['activity', '活动'],
+  ]);
+  assert.doesNotMatch(source, /view-pl-chat|tab-pl-chat|PL 工作台/);
+  assert.doesNotMatch(source, /open-project-pl-chat|data-testid': 'open-pl-chat/);
   assert.match(source, /useState\('dashboard'\)/);
   assert.match(source, /dashboard-current-project/);
   assert.match(source, /dashboard-pending-approvals/);
-  assert.match(source, /fetch\(selectedProjectId/);
+  assert.match(source, /project-decisions/);
+  assert.match(source, /record-project-decision/);
+  assert.doesNotMatch(source, /Approved Decisions/);
+  assert.match(source, /view: 'activity'/);
+  assert.match(source, /load-more-activities/);
+  assert.match(source, /实际模型：未报告\/未知/);
+  assert.match(source, /fetch\(projectId/);
   assert.match(source, /ctx\.slots\.inject\('main'/);
   assert.match(source, /ctx\.slots\.inject\('sidebar\.panellist'/);
   assert.doesNotMatch(source, /ctx\.slots\.inject\('shell\.overlay'/);
@@ -291,6 +303,8 @@ test('Phase 5 client exposes all six Host-backed views without credential or cha
   assert.match(source, /complete-project/);
   assert.match(source, /resume-project/);
   assert.match(source, /project-maxAgents/);
+  assert.match(source, /data-testid': 'delete-project'/);
+  assert.match(source, /工作目录与 PL 对话不会删除/);
   assert.match(source, /setCreateMode\(\(value\) => !value\)/);
   assert.match(source, /收起创建表单/);
   assert.match(source, /task-read-only/);
@@ -298,13 +312,16 @@ test('Phase 5 client exposes all six Host-backed views without credential or cha
   assert.match(source, /ACTIVITY_LABELS/);
   assert.doesNotMatch(source, /Reviewer 通过|Reviewer 退回/);
   assert.match(source, /ctx\.uiWorkspace\.openWorkspace\(/);
+  assert.match(source, /ctx\.uiWorkspace\.openSession\(project\.plSessionId\)/);
   assert.match(source, /requestDraftInitialization\(/);
   assert.match(source, /\.input\.for\(binding\.ctx\)\.submit\(\)/);
   assert.match(source, /defaultWorkspaceDir: currentWorkspace\(\)\?\.path/);
   assert.match(source, /value\.match\(\/\[A-Za-z\]/);
   assert.doesNotMatch(source, /workspaceDir: 'D:\\\\GPT-workspace\\\\agent-control-plane-mvp'/);
   assert.doesNotMatch(source, /startSession\(undefined/);
+  assert.doesNotMatch(source, /data-testid': 'owner-id'/);
   assert.doesNotMatch(source, /localStorage|sessionStorage|process\.env|api[_-]?key|credential/i);
+  assert.doesNotThrow(() => new Function(source));
 });
 
 

@@ -1,6 +1,6 @@
 # R0 trust boundary
 
-Scope: Agent Team Control Plane `0.5.7` on DeepSeek Harness Desktop
+Scope: Agent Team Control Plane `0.6.0` on DeepSeek Harness Desktop
 `0.2.1-rc.2`. This document describes the observed boundary, not the intended
 one. Findings are reproduced in `docs/evidence/r0/r0-evidence.redacted.json`.
 

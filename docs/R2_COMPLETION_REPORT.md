@@ -1,5 +1,7 @@
 # R2 完成报告
 
+> **2026-10-23 复核补充**：原报告把符号链接/junction 反测列为遗留。后续 R0–R5 总复核已补齐：`verification.js` 现在对 workspace 与 artifact 执行 `realpath` 规范化并拒绝逃逸，`run-coordinator.js` 会把任务范围内新增/修改的链接同样记为 FAILED evidence；Windows junction 真机文件系统单元测试覆盖“禁止遍历外部目标”和“未申报链接也会把 SUCCESS 降为 PARTIAL”。因此下文该遗留项以本补充为准。
+
 ## 环境
 
 ```text

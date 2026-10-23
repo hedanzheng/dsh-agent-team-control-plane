@@ -112,7 +112,7 @@ function runScopedActor(controlPlane, body) {
   return projectScopedActor(controlPlane, { ...body, projectId: task.projectId });
 }
 
-export function createControlPlaneHttpHandler({ controlPlane, coordinator, governance, connection, logger }) {
+export function createControlPlaneHttpHandler({ controlPlane, coordinator, governance, adapters, connection, logger }) {
   return async function handler(request, response) {
     try {
       const url = new URL(request.url, 'http://127.0.0.1');
@@ -122,6 +122,20 @@ export function createControlPlaneHttpHandler({ controlPlane, coordinator, gover
         // Fail closed behind admission. Read-only fallback is permitted only
         // when the Host truly provides no connection service.
         if (connectionAvailable) await admitRequest(connection, request);
+        if (url.searchParams.get('view') === 'activity') {
+          const cursorCreatedAt = url.searchParams.get('cursorCreatedAt');
+          const cursorId = url.searchParams.get('cursorId');
+          const data = controlPlane.activityPage({
+            projectId: url.searchParams.get('projectId'),
+            limit: url.searchParams.get('limit'),
+            cursor: cursorCreatedAt && cursorId ? { createdAt: cursorCreatedAt, id: cursorId } : null,
+            actorId: url.searchParams.get('actorId') || '',
+            eventType: url.searchParams.get('eventType') || '',
+            taskId: url.searchParams.get('taskId') || '',
+          });
+          sendJson(response, 200, { ok: true, data });
+          return;
+        }
         sendJson(response, 200, { ok: true, data: controlPlane.snapshot(url.searchParams.get('projectId') ?? undefined) });
         return;
       }
@@ -196,6 +210,12 @@ export function createControlPlaneHttpHandler({ controlPlane, coordinator, gover
         case 'complete-project': data = controlPlane.completeProject({ ...body, ...projectScopedActor(controlPlane, body) }); break;
         case 'stop-project': data = controlPlane.stopProject({ ...body, ...projectScopedActor(controlPlane, body) }); break;
         case 'resume-project': data = controlPlane.resumeProject({ ...body, ...projectScopedActor(controlPlane, body) }); break;
+        case 'delete-project': {
+          const projectId = body.projectId;
+          data = controlPlane.deleteProject({ ...body, ...projectScopedActor(controlPlane, body) });
+          adapters?.forgetProjectParent?.(projectId);
+          break;
+        }
         case 'create-task': data = controlPlane.createTask({ ...body, ...projectScopedActor(controlPlane, body) }); break;
         case 'update-task': data = controlPlane.updateTask({ ...body, ...projectScopedActor(controlPlane, body) }); break;
         case 'assign-task': data = controlPlane.assignTask({ ...body, ...projectScopedActor(controlPlane, body) }); break;

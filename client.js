@@ -66,6 +66,25 @@ window.__ModuleLoader__.load({
       return payload.data;
     }
 
+    async function requestActivityPage({ projectId, limit = 50, cursor = null, actorId = '', eventType = '', taskId = '' }) {
+      const query = new URLSearchParams({ view: 'activity', projectId, limit: String(limit) });
+      if (cursor?.createdAt && cursor?.id) {
+        query.set('cursorCreatedAt', cursor.createdAt);
+        query.set('cursorId', cursor.id);
+      }
+      if (actorId) query.set('actorId', actorId);
+      if (eventType) query.set('eventType', eventType);
+      if (taskId) query.set('taskId', taskId);
+      const response = await fetch(`${ROUTE}?${query.toString()}`);
+      const payload = await response.json();
+      if (!response.ok || payload.ok !== true) {
+        const error = new Error(payload.error?.message || `HTTP ${response.status}`);
+        error.code = payload.error?.code;
+        throw error;
+      }
+      return payload.data;
+    }
+
     function Button({ children, ...props }) {
       return h('button', { type: 'button', style: { ...styles.button, opacity: props.disabled ? 0.5 : 1 }, ...props }, children);
     }
@@ -91,7 +110,7 @@ window.__ModuleLoader__.load({
     });
     const ACTIVITY_LABELS = Object.freeze({
       RUNTIMES_SCANNED: '扫描运行环境', RUNTIME_AUTHORIZED: '授权运行环境', RUNTIME_REVOKED: '撤销运行环境授权',
-      PROJECT_CREATED: '创建项目', PROJECT_STOPPED: '停止项目', PROJECT_RESUMED: '恢复项目', PROJECT_COMPLETED: '完成项目',
+      PROJECT_CREATED: '创建项目', PROJECT_STOPPED: '停止项目', PROJECT_RESUMED: '恢复项目', PROJECT_COMPLETED: '完成项目', PROJECT_DELETED: '删除项目记录',
       CHARTER_DRAFTED: '生成章程草案', CHARTER_APPROVED: '批准章程', TEAM_PROPOSED: '提交团队方案', TEAM_APPROVED: '批准团队',
       AGENT_REPLACED: '更换 Agent', TASK_CREATED: '创建任务', TASK_UPDATED: '更新任务', TASK_ASSIGNED: '指派任务',
       TASK_UNASSIGNED: '释放任务指派', TASK_STATE_CHANGED: '任务状态变更', TASK_PROPOSED: '提议新任务', TASK_PROPOSAL_REJECTED: '驳回任务提议',
@@ -106,6 +125,7 @@ window.__ModuleLoader__.load({
     const ACTIVITY_DESCRIPTIONS = Object.freeze({
       PROJECT_CREATED: '项目已经建立，并进入需求访谈阶段。', PROJECT_STOPPED: '项目已由负责人停止；未完成任务保留为审计记录。',
       PROJECT_RESUMED: '项目已由负责人恢复，可以继续创建和执行新任务。', PROJECT_COMPLETED: '负责人已完成最终验收，项目进入只读状态。',
+      PROJECT_DELETED: '负责人已永久删除该项目的控制面记录；工作目录与 PL 对话未被修改。',
       CHARTER_DRAFTED: '需求访谈结果已整理为项目章程草案。', CHARTER_APPROVED: '负责人已批准项目章程，系统已生成团队方案。',
       TEAM_PROPOSED: 'PL 已提交团队成员方案，等待负责人确认。', TEAM_APPROVED: '负责人已批准团队，项目开始运行。',
       AGENT_REPLACED: '旧 Agent 身份已停用，并创建了新的审计身份。', TASK_CREATED: '已建立正式任务并纳入依赖图。',
@@ -181,14 +201,20 @@ window.__ModuleLoader__.load({
 
     function ProjectForm({ data, ownerId, busy, act, defaultWorkspaceDir }) {
       const harness = data.runtimes.filter((item) => item.kind === 'harness-agent' && item.availability === 'AVAILABLE' && item.authorized);
+      const workers = data.runtimes.filter((item) => item.kind === 'external-worker' && item.availability === 'AVAILABLE' && item.authorized);
+      const defaultWorker = workers[0];
       const [form, setForm] = React.useState({
         name: 'Agent Team MVP', workspaceDir: defaultWorkspaceDir || '',
-        initialGoal: '', maxAgents: 3, leadRuntimeKey: harness[0]?.providerKey || '',
+        initialGoal: '', maxAgents: 3, leadRuntimeKey: harness[0]?.providerKey || '', workerRuntimeKey: '',
       });
       const [workspaceEdited, setWorkspaceEdited] = React.useState(false);
       React.useEffect(() => {
         if (!form.leadRuntimeKey && harness[0]) setForm((value) => ({ ...value, leadRuntimeKey: harness[0].providerKey }));
       }, [harness.map((item) => item.providerKey).join('|')]);
+      const normalizedWorkspace = form.workspaceDir.trim().replace(/\\/g, '/').replace(/\/$/, '').toLowerCase();
+      const sameWorkspaceProject = normalizedWorkspace
+        ? data.projects.find((project) => project.workspaceDir.replace(/\\/g, '/').replace(/\/$/, '').toLowerCase() === normalizedWorkspace)
+        : null;
       const field = (name, label, multiline = false) => h('label', null, label,
         h(multiline ? 'textarea' : 'input', {
           style: styles.input, value: form[name], 'data-testid': `project-${name}`,
@@ -204,6 +230,10 @@ window.__ModuleLoader__.load({
       return h('div', { style: styles.section, 'data-testid': 'project-form' },
         h('strong', null, '创建 Project'),
         field('name', '名称'), field('workspaceDir', '工作目录'), field('initialGoal', '一句目标', true),
+        sameWorkspaceProject && h('div', {
+          style: { ...styles.card, color: '#b76b00', marginBottom: 8 },
+          'data-testid': 'same-workspace-warning',
+        }, `该目录已被 Project「${sameWorkspaceProject.name}」（${projectStatusLabel(sameWorkspaceProject.status)}）使用。可以继续创建，但同一目录的写入 Run 会互斥执行，建议优先复用已有 Project。`),
         h('label', null, '团队 Agent 数量',
           h('input', {
             type: 'number', min: 3, max: 8, step: 1, style: styles.input,
@@ -217,8 +247,19 @@ window.__ModuleLoader__.load({
             style: styles.input, value: form.leadRuntimeKey, 'data-testid': 'project-leadRuntimeKey',
             onChange: (event) => setForm({ ...form, leadRuntimeKey: event.target.value }),
           }, h('option', { value: '' }, '请先授权 Harness Runtime'), harness.map((runtime) => h('option', { key: runtime.providerKey, value: runtime.providerKey }, runtime.displayName)))),
+        h('label', null, 'Worker Runtime（可选）',
+          h('select', {
+            style: styles.input, value: form.workerRuntimeKey, 'data-testid': 'project-workerRuntimeKey',
+            onChange: (event) => setForm({ ...form, workerRuntimeKey: event.target.value }),
+          },
+          h('option', { value: '' }, defaultWorker
+            ? `自动选择默认：${defaultWorker.displayName}（${defaultWorker.providerKey}）`
+            : '没有已授权且可用的 Worker Runtime'),
+          workers.map((runtime) => h('option', { key: runtime.providerKey, value: runtime.providerKey }, `${runtime.displayName}（${runtime.providerKey}）`))),
+          h('div', { style: { ...styles.muted, marginBottom: 8 } },
+            '留空时使用列表中的默认项。fork / spawn 是 Worker 启动方式，不代表具体大模型；实际模型只有 Host 明确报告时才显示。')),
         h(Button, {
-          disabled: busy || !form.workspaceDir.trim() || !form.initialGoal.trim() || !form.leadRuntimeKey || Number(form.maxAgents) < 3 || Number(form.maxAgents) > 8,
+          disabled: busy || !form.workspaceDir.trim() || !form.initialGoal.trim() || !form.leadRuntimeKey || workers.length === 0 || Number(form.maxAgents) < 3 || Number(form.maxAgents) > 8,
           'data-testid': 'create-project',
           onClick: () => act('create-project', {
             actor: { type: 'human', id: ownerId }, ownerId, ...form, maxAgents: Number(form.maxAgents),
@@ -266,14 +307,19 @@ window.__ModuleLoader__.load({
         }, `批准 Charter 并接收 ${selected.project.maxAgents} 人团队建议`));
     }
 
-    function TeamApproval({ selected, ownerId, busy, act }) {
+    function TeamApproval({ selected, runtimes, ownerId, busy, act }) {
       const approval = [...selected.approvals].reverse().find((item) => item.kind === 'TEAM' && item.status === 'PENDING');
       const members = approval?.payload?.members || [];
       return h('div', { style: styles.section, 'data-testid': 'team-approval' },
         h('strong', null, `团队提案 · ${members.length}/${selected.project.maxAgents}`),
-        members.map((member) => h('div', { key: member.id, style: styles.card },
-          h('b', null, member.displayName), ` · ${member.role}`,
-          h('div', { style: styles.muted }, member.providerKey))),
+        members.map((member) => {
+          const runtime = runtimes.find((item) => item.providerKey === member.providerKey);
+          const launchMode = member.providerKey.startsWith('subagent:') ? member.providerKey.slice('subagent:'.length) : null;
+          return h('div', { key: member.id, style: styles.card },
+            h('b', null, member.displayName), ` · ${member.role}`,
+            h('div', { style: styles.muted }, `Runtime：${runtime?.displayName || member.providerKey}（${member.providerKey}）`),
+            launchMode && h('div', { style: styles.muted }, `启动方式：${launchMode} · 实际模型：Host 未报告/未知`));
+        }),
         h(Button, {
           disabled: busy, 'data-testid': 'approve-team',
           onClick: () => act('approve-team', {
@@ -283,54 +329,27 @@ window.__ModuleLoader__.load({
         }, '批准团队（仅建档，不启动模型）'));
     }
 
-    function PLChatView({ selected, busy, onOpenPLChat, onNavigate }) {
-      const lead = selected?.agents?.find((agent) => agent.id === selected.project.leadAgentId);
-      const status = selected?.project?.status;
-      const steps = {
-        CHARTER_INTERVIEW: '在 PL 对话中补充范围、约束与验收标准；随后回到“审批”批准章程。',
-        CHARTER_PENDING_APPROVAL: '访谈已经完成。请到“审批”检查并批准项目章程。',
-        TEAM_PENDING_APPROVAL: '章程已经批准。请到“审批”确认团队成员方案。',
-        ACTIVE: '把新增需求、调整意见或失败反馈告诉 PL；PL 会拆分 Task、调度 Worker 并汇报结果。',
-        STOPPED: '项目当前已停止。先到“Project”恢复项目；已取消的历史 Task 不会自动复活。',
-        COMPLETED: '项目已经完成验收。控制台保留对话之外的任务、证据和审计历史。',
-      };
-      const canOpen = selected && !['STOPPED', 'COMPLETED'].includes(status);
-      return h('section', { style: styles.section, 'aria-labelledby': 'pl-chat-heading', 'data-testid': 'view-pl-chat' },
-        h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-          h('strong', { id: 'pl-chat-heading' }, 'PL 工作台'),
-          canOpen && h(Button, { disabled: busy, 'data-testid': 'open-pl-chat', onClick: () => onOpenPLChat(selected) }, selected.project.plSessionId ? '返回 PL 对话' : '创建 PL 对话'),
-          selected && status === 'STOPPED' && h(Button, { disabled: busy, onClick: () => onNavigate('project') }, '前往恢复 Project'),
-          selected && status === 'COMPLETED' && h(Button, { disabled: busy, onClick: () => onNavigate('tasks') }, '查看交付历史')),
-        !selected && h('div', { style: styles.card }, '请先创建或选择 Project。'),
-        selected && h('div', { style: styles.card },
-          h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-            h('b', null, `当前阶段：${projectStatusLabel(status)}`),
-            h('span', { style: styles.tag }, lead ? 'PL 已建档' : 'PL 待建立')),
-          h('div', { style: { marginTop: 7 } }, h('b', null, '建议下一步：'), steps[status] || '查看 Project 状态并处理待办。')),
-        h('div', { style: styles.card },
-          h('b', null, 'PL 对话有什么用？'),
-          h('div', { style: { marginTop: 6 } }, '它是你和团队的主要沟通入口：你只需描述目标、变更与反馈，PL 负责读取控制面状态、拆分任务、安排 Worker、发起审核并汇报结果。'),
-          h('div', { style: styles.muted }, lead
-            ? `${lead.displayName} · ${lead.id} · ${lead.providerKey}`
-            : '创建 Project 后建立 Project Lead 身份。'),
-          h('div', { style: styles.muted }, '控制台用于审批、人工干预和查看证据；通常的需求沟通放在 PL 对话。当前 Host 接口每次点击会新建一条已注入 Project 上下文的 PL 对话。')));
-    }
-
-    function ActiveTeam({ selected, ownerId, busy, act }) {
+    function ActiveTeam({ selected, runtimes, ownerId, busy, act }) {
       const [replaceTarget, setReplaceTarget] = React.useState('');
       const activeAgents = selected.agents.filter((agent) => agent.status !== 'REPLACED');
       const replacedAgents = selected.agents.filter((agent) => agent.status === 'REPLACED');
       return h('div', { style: styles.section, 'data-testid': 'active-team' },
         h('strong', null, `当前团队 · ${activeAgents.length}/${selected.project.maxAgents}`),
-        activeAgents.map((agent) => h('div', { key: agent.id, style: styles.card, 'data-testid': 'agent-record' },
+        activeAgents.map((agent) => {
+          const runtime = runtimes.find((item) => item.providerKey === agent.providerKey);
+          const launchMode = agent.providerKey.startsWith('subagent:') ? agent.providerKey.slice('subagent:'.length) : null;
+          return h('div', { key: agent.id, style: styles.card, 'data-testid': 'agent-record' },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
             h('b', null, agent.displayName), h('span', { style: styles.tag }, AGENT_STATUS_LABELS[agent.status] || agent.status)),
-          h('div', null, `${agent.role === 'PROJECT_LEAD' ? '项目负责人 PL' : agent.role === 'REVIEWER' ? '独立审核 Agent' : '执行 Worker'} · ${runtimePurpose({ kind: agent.role === 'PROJECT_LEAD' ? 'harness-agent' : 'external-worker', providerKey: agent.providerKey })}`),
+          h('div', null, `${agent.role === 'PROJECT_LEAD' ? '项目负责人 PL' : agent.role === 'REVIEWER' ? '独立审核 Agent' : '执行 Worker'} · ${AGENT_STATUS_LABELS[agent.status] || agent.status}`),
+          h('div', { style: styles.muted }, `Provider：${runtime?.displayName || agent.providerKey}（${agent.providerKey}）`),
+          launchMode && h('div', { style: styles.muted }, `启动方式：${launchMode}（不是模型名称）`),
+          h('div', { style: styles.muted }, `实际模型：未报告/未知 · 当前任务：${agent.currentTaskId || '无'}`),
           h('details', { style: { marginTop: 7 } },
             h('summary', { style: { cursor: 'pointer', ...styles.muted } }, '权限与技术详情'),
-            h('div', { style: styles.muted }, `Provider：${agent.providerKey}`),
+            h('div', { style: styles.muted }, `Runtime 来源：${runtime?.source || 'Host 未报告'}`),
             h('div', { style: styles.muted }, `Permissions：${agent.permissions.join(', ')}`),
-            h('div', { style: styles.muted }, `Skills：${agent.skills.join(', ') || '无'} · 当前任务：${agent.currentTaskId || '无'}`)),
+            h('div', { style: styles.muted }, `Skills：${agent.skills.join(', ') || '无'}`)),
           agent.role !== 'PROJECT_LEAD' && agent.status === 'IDLE' && !agent.currentTaskId && replaceTarget !== agent.id && h(Button, {
             disabled: busy, 'data-testid': `replace-${agent.id}`, onClick: () => setReplaceTarget(agent.id),
           }, '更换此 Agent'),
@@ -346,7 +365,8 @@ window.__ModuleLoader__.load({
                 setReplaceTarget('');
               },
             }, '确认更换'),
-            h(Button, { disabled: busy, onClick: () => setReplaceTarget('') }, '取消')))),
+            h(Button, { disabled: busy, onClick: () => setReplaceTarget('') }, '取消')));
+        }),
         replacedAgents.length > 0 && h('details', { style: styles.card },
           h('summary', { style: { cursor: 'pointer' } }, `替换审计记录 · ${replacedAgents.length}（通常无需查看）`),
           h('div', { style: { ...styles.muted, marginTop: 7 } }, '这些旧身份必须保留，用来证明历史 Task、Run 和 Review 由谁完成；它们不占当前团队名额，也不会再次运行。'),
@@ -495,6 +515,8 @@ window.__ModuleLoader__.load({
             const result = results.find((item) => item.runId === run.id);
             const runEvidence = result ? evidence.filter((item) => item.resultId === result.id) : [];
             const active = ['CREATED', 'STARTING', 'RUNNING'].includes(run.status);
+            const needsPlDiagnosis = ['FAILED', 'CANNOT_START', 'UNKNOWN', 'TIMED_OUT'].includes(run.status)
+              || ['FAILED', 'CANNOT_START', 'UNKNOWN', 'TIMED_OUT'].includes(run.terminalKind);
             return h('div', { key: run.id, style: styles.card, 'data-testid': 'task-run', 'data-run-id': run.id },
               h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
                 h('b', null, `${run.id} · attempt ${run.attempt}`), h('span', { style: styles.tag }, run.status)),
@@ -505,6 +527,12 @@ window.__ModuleLoader__.load({
                 h('div', { style: styles.muted }, `Verified actions: ${result.verifiedActions.join('；') || 'none'}`),
                 result.unresolved?.length > 0 && h('div', { style: { ...styles.error, marginTop: 5 } }, `Unresolved: ${result.unresolved.join('；')}`),
                 runEvidence.map((item) => h('div', { key: item.id, style: styles.muted }, `${item.kind} ${item.status} · ${item.ref}`))),
+              needsPlDiagnosis && h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' }, 'data-testid': `pl-diagnosis-${run.id}` },
+                h('b', null, '下一步交给 PL 诊断'),
+                h('div', { style: styles.muted }, '从 Harness 左侧栏打开本 Project 的 PL 对话，让 PL 读取控制面状态、定位失败原因并决定修复或重试；控制面不会自动盲目重跑。'),
+                (run.errorCode || run.errorMessage) && h('details', { style: { marginTop: 5 } },
+                  h('summary', { style: { cursor: 'pointer' } }, '失败技术详情'),
+                  h('div', { style: styles.muted }, `${run.errorCode || 'RUNTIME_FAILURE'}：${run.errorMessage || 'Host 未提供详细错误'}`))),
               !readOnly && active && h(Button, {
                 disabled: busy, 'data-testid': `cancel-run-${run.id}`,
                 onClick: () => act('cancel-task-run', {
@@ -527,12 +555,10 @@ window.__ModuleLoader__.load({
       const reviewRuns = selected.reviewRuns || [];
       const findings = selected.findings || [];
       const planChecks = selected.planChecks || [];
-      const decisions = selected.decisions || [];
       const submitted = (selected.tasks || []).filter((task) => task.status === 'SUBMITTED');
       const [responseBody, setResponseBody] = React.useState('');
       const [reviewIssue, setReviewIssue] = React.useState('');
       const [planNotes, setPlanNotes] = React.useState('Current evidence and dependencies remain aligned with the approved Charter.');
-      const [decisionForm, setDecisionForm] = React.useState({ title: '', body: '' });
       const lead = selected.project.leadAgentId;
       const reviewer = selected.agents.find((agent) => agent.role === 'REVIEWER' && !['REPLACED', 'UNAVAILABLE'].includes(agent.status));
       const evidenceFor = (task) => (selected.results.find((item) => item.id === task.resultId)?.evidenceRefs || []).slice(0, 4);
@@ -599,33 +625,126 @@ window.__ModuleLoader__.load({
             h('div', null, h('b', null, plan.trigger), ` · ${plan.status}`),
             !readOnly && plan.status === 'PENDING' && h('div', null,
               h('input', { style: styles.input, value: planNotes, onChange: (event) => setPlanNotes(event.target.value) }),
-              h(Button, { disabled: busy, onClick: () => act('complete-plan-check', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, planCheckId: plan.id, decision: 'KEEP_PLAN', notes: planNotes }) }, 'KEEP PLAN'))))),
-        h('div', { style: styles.section, 'data-testid': 'decisions' },
-          h('b', null, `Approved Decisions · ${decisions.length}`),
-          decisions.map((item) => h('div', { key: item.id, style: styles.card }, h('b', null, item.title), h('div', null, item.body))),
-          !readOnly && h('input', { style: styles.input, value: decisionForm.title, placeholder: 'Decision 标题', onChange: (event) => setDecisionForm({ ...decisionForm, title: event.target.value }) }),
-          !readOnly && h('textarea', { style: styles.input, value: decisionForm.body, placeholder: '已批准决策正文', onChange: (event) => setDecisionForm({ ...decisionForm, body: event.target.value }) }),
-          !readOnly && h(Button, { disabled: busy || !decisionForm.title.trim() || !decisionForm.body.trim(), onClick: () => act('record-decision', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, title: decisionForm.title, body: decisionForm.body }) }, '记录批准 Decision')));
+              h(Button, { disabled: busy, onClick: () => act('complete-plan-check', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, planCheckId: plan.id, decision: 'KEEP_PLAN', notes: planNotes }) }, 'KEEP PLAN'))))));
+    }
+
+    function ProjectDecisions({ selected, busy, act, readOnly = false }) {
+      const decisions = selected.decisions || [];
+      const [form, setForm] = React.useState({ title: '', body: '', charterImpact: 'NONE' });
+      return h('div', { style: styles.section, 'data-testid': 'project-decisions' },
+        h('b', null, `项目决策记录 · ${decisions.length}`),
+        h('div', { style: { ...styles.muted, marginTop: 4 } }, '技术决策与重大目标/范围变更都保存在项目事实中；重大变更由已认证 Human Owner 明确确认。'),
+        decisions.length === 0 && h('div', { style: styles.card }, '尚无已批准决策。'),
+        decisions.map((item) => h('div', { key: item.id, style: styles.card },
+          h('div', { style: { ...styles.row, justifyContent: 'space-between' } }, h('b', null, item.title), h('span', { style: styles.tag }, item.status)),
+          h('div', { style: { marginTop: 5 } }, item.body),
+          h('div', { style: styles.muted }, `${item.approvedBy || '未记录批准人'} · ${formatDateTime(item.approvedAt || item.createdAt)}`))),
+        !readOnly && h('div', { style: styles.card },
+          h('input', { style: styles.input, value: form.title, placeholder: '决策标题', onChange: (event) => setForm({ ...form, title: event.target.value }) }),
+          h('textarea', { style: styles.input, value: form.body, placeholder: '已确认的决策内容', onChange: (event) => setForm({ ...form, body: event.target.value }) }),
+          h('label', null, '对 Charter 的影响', h('select', {
+            style: styles.input, value: form.charterImpact,
+            onChange: (event) => setForm({ ...form, charterImpact: event.target.value }),
+          }, [
+            ['NONE', '无（普通技术决策）'], ['MISSION', '目标 Mission'], ['SCOPE', '范围 Scope'], ['CONSTRAINTS', '不可协商约束'],
+          ].map(([value, label]) => h('option', { key: value, value }, label)))),
+          h(Button, {
+            disabled: busy || !form.title.trim() || !form.body.trim(), 'data-testid': 'record-project-decision',
+            onClick: () => act('record-decision', {
+              actor: { type: 'human', id: selected.project.ownerId }, projectId: selected.project.id,
+              title: form.title.trim(), body: form.body.trim(), charterImpact: form.charterImpact,
+            }).then(() => setForm({ title: '', body: '', charterImpact: 'NONE' })),
+          }, 'Human 记录已批准决策')));
     }
 
     function ActivityView({ selected }) {
-      const activities = selected?.activities || [];
+      const projectId = selected?.project?.id || '';
+      const [items, setItems] = React.useState([]);
+      const [cursor, setCursor] = React.useState(null);
+      const [hasMore, setHasMore] = React.useState(false);
+      const [facets, setFacets] = React.useState({ actors: [], eventTypes: [] });
+      const [filters, setFilters] = React.useState({ actorId: '', eventType: '', taskId: '' });
+      const [loading, setLoading] = React.useState(false);
+      const [error, setError] = React.useState('');
+      const requestSequence = React.useRef(0);
+      const previousProjectId = React.useRef('');
+      const latestActivityId = selected?.activities?.at(-1)?.id || '';
+      const fetchFirst = async (nextFilters = filters) => {
+        if (!projectId) return;
+        const sequence = ++requestSequence.current;
+        setLoading(true); setError('');
+        try {
+          const page = await requestActivityPage({ projectId, limit: 50, ...nextFilters });
+          if (sequence !== requestSequence.current) return;
+          setItems(page.items); setCursor(page.nextCursor); setHasMore(page.hasMore); setFacets(page.facets);
+        } catch (e) { if (sequence === requestSequence.current) setError(`${e.code ? `${e.code}: ` : ''}${e.message}`); }
+        finally { if (sequence === requestSequence.current) setLoading(false); }
+      };
+      React.useEffect(() => {
+        const cleared = { actorId: '', eventType: '', taskId: '' };
+        const projectChanged = previousProjectId.current !== projectId;
+        previousProjectId.current = projectId;
+        const nextFilters = projectChanged ? cleared : filters;
+        if (projectChanged) {
+          setFilters(cleared); setItems([]); setCursor(null); setHasMore(false); setError('');
+        }
+        if (projectId) fetchFirst(nextFilters);
+      }, [projectId, latestActivityId]);
+      const applyFilter = (name, value) => {
+        const next = { ...filters, [name]: value };
+        setFilters(next); setItems([]); setCursor(null); setHasMore(false);
+        fetchFirst(next);
+      };
+      const loadMore = async () => {
+        if (!projectId || !cursor || loading) return;
+        const sequence = ++requestSequence.current;
+        setLoading(true); setError('');
+        try {
+          const page = await requestActivityPage({ projectId, limit: 50, cursor, ...filters });
+          if (sequence !== requestSequence.current) return;
+          setItems((current) => {
+            const seen = new Set(current.map((item) => item.id));
+            return current.concat(page.items.filter((item) => !seen.has(item.id)));
+          });
+          setCursor(page.nextCursor); setHasMore(page.hasMore); setFacets(page.facets);
+        } catch (e) { if (sequence === requestSequence.current) setError(`${e.code ? `${e.code}: ` : ''}${e.message}`); }
+        finally { if (sequence === requestSequence.current) setLoading(false); }
+      };
+      const agentName = (id) => selected?.agents?.find((agent) => agent.id === id)?.displayName || id;
+      const taskName = (id) => selected?.tasks?.find((task) => task.id === id)?.title || id;
       return h('section', { style: styles.section, 'aria-labelledby': 'activity-heading', 'data-testid': 'view-activity' },
         h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
           h('strong', { id: 'activity-heading' }, '活动记录'),
-          h('span', { style: styles.tag }, `${activities.length} 条`)),
-        h('div', { style: { ...styles.muted, marginTop: 6 } }, '默认显示中文说明；展开“技术审计原文”可查看 Host 保存的原始事件、对象 ID 与英文摘要。'),
+          h('div', { style: styles.row },
+            h('span', { style: styles.tag }, `${items.length}${hasMore ? '+' : ''} 条`),
+            selected && h(Button, { disabled: loading, 'data-testid': 'refresh-activities', onClick: () => fetchFirst(filters) }, '刷新'))),
+        h('div', { style: { ...styles.muted, marginTop: 6 } }, '按当前 Project 从 Host 分页读取，默认最近 50 条；中文摘要直接可读，技术字段按需展开。'),
         !selected && h('div', { style: styles.card }, '创建并选择 Project 后显示 Host 活动记录。'),
+        selected && h('div', { style: { ...styles.row, marginTop: 8 }, 'data-testid': 'activity-filters' },
+          h('select', { style: { ...styles.input, flex: '1 1 190px', margin: 0 }, value: filters.actorId, onChange: (event) => applyFilter('actorId', event.target.value) },
+            h('option', { value: '' }, '全部 Agent / 操作者'),
+            facets.actors.map((entry) => h('option', { key: entry.value, value: entry.value }, `${agentName(entry.value)}（${entry.count}）`))),
+          h('select', { style: { ...styles.input, flex: '1 1 190px', margin: 0 }, value: filters.eventType, onChange: (event) => applyFilter('eventType', event.target.value) },
+            h('option', { value: '' }, '全部事件类型'),
+            facets.eventTypes.map((entry) => h('option', { key: entry.value, value: entry.value }, `${ACTIVITY_LABELS[entry.value] || entry.value}（${entry.count}）`))),
+          h('select', { style: { ...styles.input, flex: '1 1 190px', margin: 0 }, value: filters.taskId, onChange: (event) => applyFilter('taskId', event.target.value) },
+            h('option', { value: '' }, '全部 Task'),
+            (selected.tasks || []).map((task) => h('option', { key: task.id, value: task.id }, `${task.title} · ${task.id}`)))),
+        error && h('div', { role: 'alert', style: { ...styles.card, color: '#d44' } }, error),
         selected && h('div', { 'data-testid': 'activity-feed' },
-          [...activities].reverse().map((item) => h('div', { key: item.id, style: styles.card },
+          items.map((item) => h('div', { key: item.id, style: styles.card },
             h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
               h('b', null, ACTIVITY_LABELS[item.eventType] || '系统事件'), h('span', { style: styles.muted }, formatDateTime(item.createdAt))),
-            h('div', { style: { marginTop: 5 } }, ACTIVITY_DESCRIPTIONS[item.eventType] || '系统记录了一条审计事件；详细内容见技术审计原文。'),
+            h('div', { style: { marginTop: 5 } }, ACTIVITY_DESCRIPTIONS[item.eventType] || item.summary),
+            h('div', { style: { ...styles.muted, marginTop: 4 } }, `操作者：${agentName(item.actorId)}${item.taskId ? ` · Task：${taskName(item.taskId)}` : ''}`),
             h('details', { style: { marginTop: 7 } },
               h('summary', { style: { cursor: 'pointer', ...styles.muted } }, '技术审计原文'),
               h('div', { style: styles.muted }, `事件：${item.eventType}`),
               h('div', { style: styles.muted }, `原文：${item.summary}`),
-              h('div', { style: styles.muted }, `操作者：${item.actorId} · 对象：${item.objectRef}`))))));
+              h('div', { style: styles.muted }, `操作者 ID：${item.actorId} · 对象：${item.objectRef}${item.taskId ? ` · Task ID：${item.taskId}` : ''}`)))),
+          items.length === 0 && !loading && h('div', { style: styles.card }, '当前筛选条件下没有活动记录。'),
+          hasMore && h(Button, { disabled: loading, 'data-testid': 'load-more-activities', onClick: loadMore, style: { ...styles.button, marginTop: 10 } }, loading ? '正在加载…' : '加载更多'),
+          loading && items.length === 0 && h('div', { style: styles.card }, '正在读取活动记录…')));
     }
 
     // R5: Dashboard landing view. Aggregates project health, pending
@@ -642,6 +761,9 @@ window.__ModuleLoader__.load({
       const submittedTasks = (selected?.tasks || []).filter((task) => task.status === 'SUBMITTED');
       const waitingTasks = (selected?.tasks || []).filter((task) => task.status === 'WAITING');
       const recentActivities = [...(selected?.activities || [])].reverse().slice(0, 6);
+      const activeAgents = (selected?.agents || []).filter((agent) => agent.status === 'RUNNING');
+      const currentCharter = selected?.charters?.find((charter) => charter.version === selected.project.charterVersion) || selected?.charters?.at(-1);
+      const currentMilestone = scopedTasks.find((task) => task.status !== 'VERIFIED')?.title || (scopedTasks.length ? '范围内任务均已完成' : '尚未建立任务');
       const runtimes = data?.runtimes || [];
       const authorizedRuntimes = runtimes.filter((runtime) => runtime.authorized).length;
       const pendingApprovalProjects = projects.filter((project) => ['CHARTER_PENDING_APPROVAL', 'TEAM_PENDING_APPROVAL'].includes(project.status));
@@ -674,8 +796,11 @@ window.__ModuleLoader__.load({
             h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
               h('b', null, `当前项目：${selected.project.name}`),
               h('span', { style: styles.tag }, projectStatusLabel(selected.project.status))),
+            h('div', { style: { marginTop: 6 } }, h('b', null, '目标：'), currentCharter?.mission || selected.project.initialGoal),
+            h('div', { style: styles.muted }, `当前里程碑：${currentMilestone}`),
             h('div', { style: { ...styles.muted, marginTop: 4 } },
               `任务验收 ${verified}/${scopedTasks.length}`
+              + (activeAgents.length ? ` · ${activeAgents.length} 个 Agent 工作中` : '')
               + (activeRuns.length ? ` · ${activeRuns.length} 个运行中` : '')
               + (submittedTasks.length ? ` · ${submittedTasks.length} 个待审核` : '')
               + (waitingTasks.length ? ` · ${waitingTasks.length} 个等待处理` : '')
@@ -711,15 +836,17 @@ window.__ModuleLoader__.load({
 
     function ControlPlanePanel({ onClose, onOpenPLChat, defaultWorkspaceDir }) {
       const [data, setData] = React.useState(null);
-      const [ownerId, setOwnerId] = React.useState('human-owner');
       const [busy, setBusy] = React.useState(false);
       const [error, setError] = React.useState('');
+      const [notice, setNotice] = React.useState('');
       const [createMode, setCreateMode] = React.useState(false);
       const [selectedProjectId, setSelectedProjectId] = React.useState('');
       const [activeView, setActiveView] = React.useState('dashboard');
+      const selected = data?.selected;
+      const ownerId = selected?.project?.ownerId || 'authenticated-owner';
 
-      const load = React.useCallback(async () => {
-        const response = await fetch(selectedProjectId ? `${ROUTE}?projectId=${encodeURIComponent(selectedProjectId)}` : ROUTE);
+      const load = React.useCallback(async (projectId = selectedProjectId) => {
+        const response = await fetch(projectId ? `${ROUTE}?projectId=${encodeURIComponent(projectId)}` : ROUTE);
         const payload = await response.json();
         if (!response.ok || payload.ok !== true) throw new Error(payload.error?.message || `HTTP ${response.status}`);
         setData(payload.data);
@@ -730,22 +857,29 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         const active = data?.selected?.taskRuns?.some((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
         if (!active) return undefined;
-        const timer = setInterval(() => load().catch((e) => setError(e.message)), 1000);
+        const timer = setInterval(() => {
+          if (globalThis.document?.visibilityState === 'hidden') return;
+          load().catch((e) => setError(e.message));
+        }, 3000);
         return () => clearInterval(timer);
-      }, [data?.selected?.taskRuns?.map((run) => `${run.id}:${run.status}`).join('|'), load]);
+      }, [activeView, data?.selected?.taskRuns?.map((run) => `${run.id}:${run.status}`).join('|'), load]);
 
       const act = async (action, body) => {
-        setBusy(true); setError('');
+        setBusy(true); setError(''); setNotice('');
         try {
           const next = await request(action, body);
           setData(next); setSelectedProjectId(next.selected?.project?.id || ''); setCreateMode(false);
+          if (action === 'delete-project' && next.deletedProject) {
+            setNotice(`已删除 Project「${next.deletedProject.name}」的控制面记录；工作目录和 PL 对话均未改动。`);
+          }
           if (action === 'create-project' && next.selected?.project) {
             try {
               await onOpenPLChat(next.selected);
+              await load(next.selected.project.id);
             } catch (e) {
               // R3.3: the Project record is already committed. Surface a
               // recoverable state instead of a duplicate Project on retry.
-              setError(`Project 已创建，但 PL 对话未打开：${e.message}。可在“PL 工作台”重新绑定，不会重复创建 Project。`);
+              setError(`Project 已创建，但 PL 对话未打开：${e.message}。可在“项目”页重试创建，不会重复创建 Project。`);
             }
           }
         }
@@ -754,7 +888,7 @@ window.__ModuleLoader__.load({
       };
 
       const launchPLChat = async (projectState) => {
-        setBusy(true); setError('');
+        setBusy(true); setError(''); setNotice('');
         try {
           const outcome = await onOpenPLChat(projectState);
           if (outcome?.message) setError(outcome.message);
@@ -763,10 +897,9 @@ window.__ModuleLoader__.load({
         finally { setBusy(false); }
       };
 
-      const selected = data?.selected;
       const tabs = [
-        ['dashboard', '总览'], ['pl-chat', 'PL 工作台'], ['project', '项目'],
-        ['agents', '团队'], ['tasks', '任务'], ['approvals', '审批'], ['activity', '活动记录'],
+        ['dashboard', '总览'], ['project', '项目'], ['agents', '团队'],
+        ['tasks', '任务'], ['approvals', '审批'], ['activity', '活动'],
       ];
       const projectGroups = data ? [
         ['进行中的项目', ['ACTIVE']],
@@ -778,30 +911,49 @@ window.__ModuleLoader__.load({
       const scopedTasks = selected?.tasks?.filter((task) => task.status !== 'CANCELLED') || [];
       const verifiedTasks = scopedTasks.filter((task) => task.status === 'VERIFIED');
       const cancelledTasks = selected?.tasks?.filter((task) => task.status === 'CANCELLED') || [];
+      const completionBlockers = selected ? [
+        scopedTasks.length === 0 && '至少需要一个未取消的 Task',
+        scopedTasks.some((task) => task.status !== 'VERIFIED') && `${scopedTasks.length - verifiedTasks.length} 个 Task 尚未验收`,
+        selected.taskRuns.some((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status)) && '存在运行中的 Worker Run',
+        selected.reviewRuns.some((run) => ['STARTING', 'RUNNING'].includes(run.status)) && '存在运行中的 Review Run',
+        selected.requestRuns.some((run) => ['STARTING', 'RUNNING'].includes(run.status)) && '存在运行中的 Request Run',
+        selected.requests.some((item) => ['PENDING', 'IN_PROGRESS'].includes(item.status)) && '存在未处理的协作请求',
+        selected.taskProposals.some((item) => item.status === 'PENDING') && '存在待决定的 Task 提案',
+        selected.planChecks.some((item) => item.status === 'PENDING') && '存在待完成的计划检查',
+        selected.findings.some((item) => item.status !== 'CLOSED') && '存在未关闭的问题',
+      ].filter(Boolean) : [];
+      const selectedPlRuntime = selected ? data.runtimes.find((runtime) => runtime.providerKey === selected.project.leadRuntimeKey) : null;
+      const selectedWorkerRuntime = selected ? data.runtimes.find((runtime) => runtime.providerKey === selected.project.workerRuntimeKey) : null;
       const projectView = data && h('section', { 'aria-labelledby': 'project-heading', 'data-testid': 'view-project' },
         h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
           h('strong', { id: 'project-heading', style: { fontSize: 16 } }, 'Project'),
           h(Button, { 'data-testid': 'new-project', onClick: () => setCreateMode((value) => !value) }, createMode ? '收起创建表单' : '新建 Project')),
-        h('label', null, 'Human Owner ID', h('input', { style: styles.input, value: ownerId, 'data-testid': 'owner-id', onChange: (e) => setOwnerId(e.target.value) })),
+        h('div', { style: styles.muted, 'data-testid': 'owner-identity' }, selected
+          ? `负责人身份由 Host 认证：${selected.project.ownerId}`
+          : '负责人身份将在创建时由 Host 认证，不接受手工输入。'),
         data.projects.length > 0 && h('label', null, '当前 Project', h('select', {
           style: styles.input, value: selected?.project?.id || '', 'data-testid': 'project-selector',
           onChange: (event) => { setSelectedProjectId(event.target.value); setCreateMode(false); },
         }, projectGroups.map(([label, projects]) => h('optgroup', { key: label, label },
-          projects.map((project) => h('option', { key: project.id, value: project.id }, `${project.name} · ${projectStatusLabel(project.status)}`)))))),
+          projects.map((project) => h('option', { key: project.id, value: project.id }, `${project.name} · ${projectStatusLabel(project.status)} · ${project.id}`)))))),
         selected && !createMode && h('div', { style: styles.card, 'data-testid': 'project-summary' },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
             h('strong', null, selected.project.name), h('span', { style: styles.tag, 'data-testid': 'project-status' }, projectStatusLabel(selected.project.status))),
           h('div', { style: styles.muted }, `${selected.project.id} · owner ${selected.project.ownerId} · version ${selected.project.version}`),
           h('div', { style: styles.muted }, `Workspace: ${selected.project.workspaceDir}`),
+          h('div', { style: styles.muted }, `PL Runtime：${selectedPlRuntime?.displayName || selected.project.leadRuntimeKey}`),
+          h('div', { style: styles.muted, 'data-testid': 'project-worker-runtime' }, `Worker Runtime：${selectedWorkerRuntime?.displayName || selected.project.workerRuntimeKey || '自动选择'}${selected.project.workerRuntimeKey ? `（${selected.project.workerRuntimeKey}）` : ''}`),
           h('div', { style: { marginTop: 8 } }, h('b', null, 'Mission: '), (selected.charters.find((charter) => charter.version === selected.project.charterVersion) || selected.charters.at(-1))?.mission || selected.project.initialGoal),
           h('div', { style: styles.muted }, `当前里程碑：${(scopedTasks.find((task) => task.status !== 'VERIFIED') || {}).title || '范围内任务均已完成'} · 验收 ${verifiedTasks.length}/${scopedTasks.length}${cancelledTasks.length ? ` · 历史取消 ${cancelledTasks.length}` : ''}`),
+          selected.project.status === 'ACTIVE' && completionBlockers.length > 0 && h('div', { style: { ...styles.muted, marginTop: 6 }, 'data-testid': 'completion-blockers' },
+            `暂不可完成 Project：${completionBlockers.join('；')}`),
           h('div', { style: { ...styles.row, marginTop: 9 } },
-            !['STOPPED', 'COMPLETED'].includes(selected.project.status) && h(Button, { disabled: busy, 'data-testid': 'open-project-pl-chat', onClick: () => launchPLChat(selected) }, selected.project.plSessionId ? '返回 PL 对话' : '创建 PL 对话'),
+            !selected.project.plSessionId && !['STOPPED', 'COMPLETED'].includes(selected.project.status) && h(Button, { disabled: busy, 'data-testid': 'retry-create-pl-chat', onClick: () => launchPLChat(selected) }, '重试创建 PL 对话'),
             selected.project.status === 'STOPPED' && h(Button, {
               disabled: busy, 'data-testid': 'resume-project',
               onClick: () => act('resume-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version }),
             }, '恢复 Project'),
-            selected.project.status === 'ACTIVE' && scopedTasks.length > 0 && scopedTasks.every((task) => task.status === 'VERIFIED') && h(Button, {
+            selected.project.status === 'ACTIVE' && completionBlockers.length === 0 && h(Button, {
               disabled: busy, 'data-testid': 'complete-project',
               onClick: () => act('complete-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version }),
             }, '验收并完成 Project'),
@@ -811,7 +963,23 @@ window.__ModuleLoader__.load({
                 if (!globalThis.confirm('停止后，未开始或等待中的 Task 会记为“已取消”，但 Project 之后可以恢复并创建新 Task。确认停止？')) return;
                 act('stop-project', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, expectedVersion: selected.project.version, reason: '由 Human Owner 在控制台停止' });
               },
-            }, '停止 Project（可恢复）'))),
+            }, '停止 Project（可恢复）'),
+            selected.project.status !== 'ACTIVE' && h(Button, {
+              disabled: busy,
+              'data-testid': 'delete-project',
+              style: { ...styles.button, color: '#d44' },
+              title: '只删除控制面中的 Project 及其审计记录，不删除工作目录或 PL 对话',
+              onClick: () => {
+                if (!globalThis.confirm(`永久删除 Project「${selected.project.name}」？\n\n将删除控制面中的 Charter、Agent、Task、Run、Review 和 Activity 记录。工作目录与 PL 对话不会删除。此操作不可恢复。`)) return;
+                act('delete-project', {
+                  actor: { type: 'human', id: ownerId },
+                  projectId: selected.project.id,
+                  expectedVersion: selected.project.version,
+                  confirmation: selected.project.id,
+                });
+              },
+            }, '永久删除 Project 记录'))),
+        selected && !createMode && h(ProjectDecisions, { selected, busy, act, readOnly: selected.project.status !== 'ACTIVE' }),
         (!selected || createMode) && h(ProjectForm, { data, ownerId, busy, act, defaultWorkspaceDir }),
         h(RuntimeCatalog, { data, ownerId, busy, act }));
 
@@ -820,11 +988,10 @@ window.__ModuleLoader__.load({
         h('p', null, error ? `Host 状态读取失败：${error}` : '正在读取 Host 状态…'),
         error && h(Button, { 'data-testid': 'retry-load', onClick: () => { setError(''); load().catch((e) => setError(e.message)); } }, '重试'));
       else if (activeView === 'dashboard') view = h(DashboardView, { data, selected, onNavigate: setActiveView });
-      else if (activeView === 'pl-chat') view = h(PLChatView, { selected, busy, onOpenPLChat: launchPLChat, onNavigate: setActiveView });
       else if (activeView === 'project') view = projectView;
       else if (activeView === 'agents') view = h('section', { 'aria-labelledby': 'agents-heading', 'data-testid': 'view-agents' },
         h('strong', { id: 'agents-heading', style: { fontSize: 16 } }, 'Agents'),
-        selected && !createMode ? h(ActiveTeam, { selected, ownerId, busy, act }) : h('div', { style: styles.card }, '创建并选择 Project 后显示 Agent Records。'));
+        selected && !createMode ? h(ActiveTeam, { selected, runtimes: data.runtimes, ownerId, busy, act }) : h('div', { style: styles.card }, '创建并选择 Project 后显示 Agent Records。'));
       else if (activeView === 'tasks') view = h('section', { 'aria-labelledby': 'tasks-heading', 'data-testid': 'view-tasks' },
         h('strong', { id: 'tasks-heading', style: { fontSize: 16 } }, 'Tasks'),
         selected && !createMode && ['ACTIVE', 'STOPPED', 'COMPLETED'].includes(selected.project.status)
@@ -834,7 +1001,7 @@ window.__ModuleLoader__.load({
         h('strong', { id: 'approvals-heading', style: { fontSize: 16 } }, 'Approvals & Governance'),
         selected && !createMode && selected.project.status === 'CHARTER_INTERVIEW' && h(Interview, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'CHARTER_PENDING_APPROVAL' && h(CharterApproval, { selected, ownerId, busy, act }),
-        selected && !createMode && selected.project.status === 'TEAM_PENDING_APPROVAL' && h(TeamApproval, { selected, ownerId, busy, act }),
+        selected && !createMode && selected.project.status === 'TEAM_PENDING_APPROVAL' && h(TeamApproval, { selected, runtimes: data.runtimes, ownerId, busy, act }),
         selected && !createMode && ['ACTIVE', 'COMPLETED', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, { selected, ownerId, busy, act, readOnly: selected.project.status !== 'ACTIVE' }),
         (!selected || createMode) && h('div', { style: styles.card }, '创建并选择 Project 后显示审批队列。'));
       else view = h(ActivityView, { selected });
@@ -844,7 +1011,8 @@ window.__ModuleLoader__.load({
           h('div', { style: { minWidth: 0 } },
             h('strong', { style: { display: 'block', fontSize: 18 } }, 'Agent Team Control Plane'),
             h('div', { style: styles.muted }, selected ? `${selected.project.name} · ${projectStatusLabel(selected.project.status)}` : 'Project、Agent、Task 与审批控制台')),
-          h(Button, { 'data-testid': 'close-control-plane', onClick: onClose }, '返回对话')),
+          h('div', { style: styles.row },
+            h(Button, { 'data-testid': 'close-control-plane', onClick: onClose }, '关闭控制台'))),
         h('nav', { style: styles.tabBar, 'aria-label': 'Control Plane views' },
           tabs.map(([id, label]) => h('button', {
             key: id, type: 'button', 'data-testid': `tab-${id}`, onClick: () => setActiveView(id),
@@ -854,6 +1022,7 @@ window.__ModuleLoader__.load({
           }, label))),
         h('main', { style: styles.body },
           h('div', { style: styles.content },
+            notice && h('div', { role: 'status', 'data-testid': 'notice', style: { ...styles.card, color: '#2a7', marginBottom: 12 } }, notice),
             error && h('div', { role: 'alert', 'data-testid': 'error', style: { ...styles.card, color: '#d44', marginBottom: 12 } }, error),
             view)));
     }
@@ -899,17 +1068,25 @@ window.__ModuleLoader__.load({
         const openPLChat = async (projectState) => {
           const project = projectState?.project || projectState;
           if (!project) throw new Error('请先创建或选择 Project');
-          // R3.3: never create a second PL Session for a Project that is already
-          // bound. If the bound Session still exists in the Host, reuse it and
-          // direct the Human to the left sidebar (the primary entry point).
+          // R3/R5: a bound Project always targets its existing Session first.
+          // R0 verified uiWorkspace.openSession(sessionId) as the public Host
+          // navigation API, including persisted Sessions that are not currently
+          // retained by the main view.
           if (project.plSessionId) {
-            const sessionSnapshot = ctx.sessions.list.getSnapshot();
-            const stillLive = Boolean(sessionSnapshot.byId?.[project.plSessionId]);
-            if (stillLive) {
-              return { reused: true, sessionId: project.plSessionId, message: '已有 PL 对话，请在左侧栏继续；不会重复创建 Session。' };
+            if (typeof ctx.uiWorkspace.openSession !== 'function') {
+              throw new Error('Host 未提供 openSession，已保留原绑定且不会新建重复会话');
             }
-            // The previously bound Session no longer exists in the Host; fall
-            // through to create exactly one replacement and rebind it.
+            try {
+              await ctx.uiWorkspace.openSession(project.plSessionId);
+              return { reused: true, sessionId: project.plSessionId, message: '已返回该 Project 绑定的 PL 对话。' };
+            } catch (error) {
+              const sessionSnapshot = ctx.sessions.list.getSnapshot();
+              if (sessionSnapshot.byId?.[project.plSessionId]) {
+                throw new Error(`Host 无法打开仍存在的 PL 会话：${error.message}`);
+              }
+            }
+            // Host confirms the old reference is unavailable: create one
+            // replacement and atomically persist the new binding.
           }
           const workspaceId = resolveWorkspaceId(project);
           if (!workspaceId) throw new Error('没有可用的 Harness Workspace，请先在左侧项目区打开工作目录');
@@ -928,24 +1105,31 @@ window.__ModuleLoader__.load({
               : '先说明你已接管，概括当前目标，并给出一个明确、可执行的下一步；需要 Human 决策时直接提问。',
             '每次回复末尾都用“下一步：”明确说明 Human 或团队接下来要做什么。',
           ].join('\n');
+          let createdSessionId = null;
+          let bindAndSubmit = null;
           await ctx.uiWorkspace.openWorkspace(workspaceId, (sessionId) => {
+            createdSessionId = sessionId;
             const binding = ctx.sessions.binding(sessionId);
             if (!binding?.ctx) throw new Error('新 PL 会话尚未就绪');
             const result = ctx.conversation.input.requestDraftInitialization(binding, {
               prompt, clearPreviousDraft: true,
             });
             if (result === 'blocked') throw new Error('新 PL 会话输入区正忙，请稍后重试');
-            ctx.conversation.input.for(binding.ctx).submit();
             // R1: persist the Project ↔ PL Session binding so agent_team_* tools
-            // can authorize this exact Session. This is a Human (owner) action.
-            request('bind-project-pl-session', {
+            // can authorize this exact Session. Bind before submitting the PL
+            // prompt, eliminating the race where the new PL could call a tool
+            // before its Session became authoritative.
+            bindAndSubmit = request('bind-project-pl-session', {
               projectId: project.id,
               plSessionId: sessionId,
-            }).catch((error) => {
-              console.error(`PL Session 绑定失败（agent_team_* 工具将被拒绝）: ${error.message}`);
+            }).then(() => {
+              ctx.conversation.input.for(binding.ctx).submit();
+              return sessionId;
             });
           }, { agentPreset: 'standard' });
-          return { reused: false, sessionId: null, message: '已创建并绑定新的 PL 对话。' };
+          if (!createdSessionId || !bindAndSubmit) throw new Error('PL 会话创建被后续导航中断，Project 尚未绑定会话');
+          await bindAndSubmit;
+          return { reused: false, sessionId: createdSessionId, message: '已创建并绑定新的 PL 对话。' };
         };
         ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main', key: 'agent-team-control-plane',

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ControlPlaneStore } from '../../src/host/store.js';
@@ -54,6 +54,12 @@ test('Phase 1 lifecycle is durable, bounded, authorized, and starts no runtimes'
     }
     assert.ok(state.runtimes.every((runtime) => runtime.authorized));
 
+    assert.throws(() => plane.createProject({
+      actor: OWNER, operationId: operation('relative-workspace'), ownerId: OWNER.id,
+      name: 'Invalid workspace', workspaceDir: 'relative/path', initialGoal: 'Must fail early.',
+      maxAgents: 3, leadRuntimeKey: 'harness:deepseek-official',
+    }), (error) => error.code === 'INVALID_WORKSPACE');
+
     state = plane.createProject({
       actor: OWNER, operationId: operation('project'), ownerId: OWNER.id,
       name: 'Phase 1 acceptance', workspaceDir: root, initialGoal: 'Build a durable three-agent control plane.',
@@ -100,6 +106,18 @@ test('Phase 1 lifecycle is durable, bounded, authorized, and starts no runtimes'
     assert.equal(selected.charters.at(-1).status, 'APPROVED');
     const proposed = selected.approvals.find((approval) => approval.kind === 'TEAM' && approval.status === 'PENDING').payload.members;
     assert.equal(proposed.length, 3);
+    assert.throws(() => plane.proposeTeam({
+      actor: { type: 'pl', id: selected.project.leadAgentId }, operationId: operation('missing-reviewer'),
+      projectId, expectedVersion: selected.project.version,
+      members: proposed.filter((member) => member.role !== 'REVIEWER'),
+    }), (error) => error.code === 'INVALID_TEAM');
+    assert.throws(() => plane.proposeTeam({
+      actor: { type: 'pl', id: selected.project.leadAgentId }, operationId: operation('wrong-worker-runtime'),
+      projectId, expectedVersion: selected.project.version,
+      members: proposed.map((member) => member.role === 'WORKER'
+        ? { ...member, providerKey: 'harness:deepseek-official' }
+        : member),
+    }), (error) => error.code === 'INVALID_TEAM_RUNTIME');
 
     // Regression: a proposal created before a later Host scan may retain a stale
     // Worker key. Approval must rebind it to a currently authorized external runtime.
@@ -137,6 +155,12 @@ test('Phase 1 lifecycle is durable, bounded, authorized, and starts no runtimes'
       'subagent:spawn',
     );
     assert.equal(counters.modelStarts, 0);
+    const approvedWorker = selected.agents.find((agent) => agent.role === 'WORKER');
+    assert.throws(() => plane.replaceAgent({
+      actor: OWNER, operationId: operation('wrong-replacement-runtime'), projectId,
+      expectedVersion: selected.project.version, agentId: approvedWorker.id,
+      providerKey: 'harness:deepseek-official',
+    }), (error) => error.code === 'INVALID_TEAM_RUNTIME');
 
     assert.throws(() => plane.authorizeRuntime({
       actor: OWNER, operationId: approveOperation, providerKey: 'subagent:codex', authorized: false,
@@ -151,6 +175,32 @@ test('Phase 1 lifecycle is durable, bounded, authorized, and starts no runtimes'
     assert.equal(selected.agents.length, 3);
     assert.ok(selected.agents.every((agent) => agent.status === 'IDLE'));
     assert.equal(counters.modelStarts, 0);
+
+    assert.throws(() => plane.deleteProject({
+      actor: OWNER, operationId: operation('delete-active'), projectId,
+      expectedVersion: selected.project.version, confirmation: projectId,
+    }), (error) => error.code === 'PROJECT_MUST_BE_STOPPED');
+
+    let deletionState = plane.stopProject({
+      actor: OWNER, operationId: operation('stop-for-delete'), projectId,
+      expectedVersion: selected.project.version, reason: 'Delete lifecycle test',
+    });
+    assert.throws(() => plane.deleteProject({
+      actor: OWNER, operationId: operation('bad-confirmation'), projectId,
+      expectedVersion: deletionState.selected.project.version, confirmation: 'wrong-project',
+    }), (error) => error.code === 'DELETE_CONFIRMATION_MISMATCH');
+    deletionState = plane.deleteProject({
+      actor: OWNER, operationId: operation('delete'), projectId,
+      expectedVersion: deletionState.selected.project.version, confirmation: projectId,
+    });
+    assert.equal(deletionState.projects.length, 0);
+    assert.equal(deletionState.selected, null);
+    assert.equal(deletionState.deletedProject.id, projectId);
+    assert.equal(store.getProject(projectId), undefined);
+    assert.equal(store.listAgents(projectId).length, 0);
+    assert.equal(store.listActivities(projectId).length, 0);
+    assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM activities WHERE event_type='PROJECT_DELETED' AND object_ref=?").get(projectId).n, 1);
+    assert.equal(existsSync(root), true, 'deleting the Project record must not remove the workspace');
   } finally {
     if (store) store.close();
     rmSync(root, { recursive: true, force: true });
@@ -170,6 +220,11 @@ test('Human-selected team size creates one PL, one Reviewer, and the requested W
       actor: OWNER, operationId: operation('too-small'), ownerId: OWNER.id,
       name: 'Invalid team', workspaceDir: root, initialGoal: 'Must reject a team smaller than the required roles.',
       maxAgents: 2, leadRuntimeKey: 'harness:deepseek-official',
+    }), (error) => error.code === 'INVALID_INPUT');
+    assert.throws(() => plane.createProject({
+      actor: OWNER, operationId: operation('too-large'), ownerId: OWNER.id,
+      name: 'Invalid large team', workspaceDir: root, initialGoal: 'Must reject a team larger than the Host limit.',
+      maxAgents: 33, leadRuntimeKey: 'harness:deepseek-official',
     }), (error) => error.code === 'INVALID_INPUT');
 
     state = plane.createProject({

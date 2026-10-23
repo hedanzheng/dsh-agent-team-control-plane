@@ -116,4 +116,4 @@ PL 工具边界      exec.agent 必须是 Project 绑定的活跃 PL Session；�
 
 1. Human 验收 R1 后提交 Git（建议提交信息：`R1: authenticated HTTP identity boundary, PL session binding, least-privilege migration, and verification command whitelist`）。
 2. R2 开始前建议先做一次真实 Host 集成冒烟：加载插件 → 匿名 GET/POST 应 401/503 → 登录后 GET 200 → 打开 PL 会话确认自动绑定 → PL 调用 `agent_team_project_state` 成功、普通会话调用被拒。
-3. R2 按任务书继续（Dashboard/总览 UI 与六页签重构），不要回改 R1 边界语义；如需调整身份/绑定规则，必须先更新本报告对应的反向测试。
+3. R2 按任务书继续证据审核与 Reviewer 边界；Dashboard/总览与六页签属于 R5。不要回改 R1 边界语义；如需调整身份/绑定规则，必须先更新本报告对应的反向测试。

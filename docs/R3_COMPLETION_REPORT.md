@@ -1,5 +1,7 @@
 # R3 完成报告
 
+> **2026-10-23 复核更正**：原报告称宿主没有可靠的既有 Session 定位接口，这与 R0 已核实的公开 API 不一致。当前实现已改用 `ctx.uiWorkspace.openSession(project.plSessionId)` 返回绑定会话；新会话路径先持久化 Project↔Session 绑定，再提交首条 PL prompt，消除了 PL 工具先于绑定执行以及重复创建 Session 的竞态。专项测试覆盖“绑定会话只调用 openSession”和“bind 完成后才 submit”。下文原始阶段记录保留作历史，结论以本更正为准。
+
 ## 环境
 - Git SHA / Branch：`main`（基于 `d705504`，本次改动待提交）
 - DeepSeek Harness 版本：`0.2.x`（Electron `44.7.0`，`app.asar` 内 `@deepseek-ai/dsh-client-connection` 已实机解包核对）

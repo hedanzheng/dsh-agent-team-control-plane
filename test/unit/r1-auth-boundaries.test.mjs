@@ -22,11 +22,11 @@ function operation(prefix) {
 
 const ROUTE = '/agent-team-control-plane/v1';
 
-function mockRequest({ method = 'GET', body, headers = {} } = {}) {
+function mockRequest({ method = 'GET', body, headers = {}, url = ROUTE } = {}) {
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')];
   return {
     method,
-    url: ROUTE,
+    url,
     headers,
     [Symbol.asyncIterator]() {
       let index = 0;
@@ -84,9 +84,11 @@ function httpFixture({ connection = peerAdmitting({ principal: { kind: 'owner', 
       return project;
     },
     snapshot(projectId) { calls.push(['snapshot', projectId]); return { selected: { project: { ...project } } }; },
+    activityPage(input) { calls.push(['activityPage', input]); return { items: [], hasMore: false, nextCursor: null, facets: { actors: [], eventTypes: [] } }; },
     createTask(input) { calls.push(['createTask', input]); return { ok: true }; },
     rescanRuntimes(input) { calls.push(['rescanRuntimes', input]); return { ok: true }; },
     createProject(input) { calls.push(['createProject', input]); return { ok: true }; },
+    deleteProject(input) { calls.push(['deleteProject', input]); return { projects: [], selected: null }; },
     bindProjectPlSession(input) { calls.push(['bindProjectPlSession', input]); return { ok: true }; },
     approveVerificationCommand(input) { calls.push(['approveVerificationCommand', input]); return { ok: true }; },
     resolveVerificationCommands(projectId, commandIds) {
@@ -110,7 +112,10 @@ function httpFixture({ connection = peerAdmitting({ principal: { kind: 'owner', 
   const governance = {
     recordDecision(input) { calls.push(['recordDecision', input]); return { ok: true }; },
   };
-  const handler = createControlPlaneHttpHandler({ controlPlane, coordinator, governance, connection, logger: null });
+  const adapters = {
+    forgetProjectParent(projectId) { calls.push(['forgetProjectParent', projectId]); },
+  };
+  const handler = createControlPlaneHttpHandler({ controlPlane, coordinator, governance, adapters, connection, logger: null });
   return { calls, handler, project };
 }
 
@@ -160,6 +165,22 @@ test('without a Host connection service, POST fails closed and GET stays read-on
   const read = mockResponse();
   await handler(mockRequest({ method: 'GET' }), read);
   assert.equal(read.state.status, 200);
+});
+
+test('Activity GET is admitted and forwards only server-side page/filter parameters', async () => {
+  const { calls, handler, project } = httpFixture();
+  const response = mockResponse();
+  const query = new URLSearchParams({
+    view: 'activity', projectId: project.id, limit: '50', actorId: 'AGENT-PL-1',
+    eventType: 'TASK_UPDATED', taskId: 'TASK-1', cursorCreatedAt: '2026-10-23T00:00:00.000Z', cursorId: 'ACTIVITY-1',
+  });
+  await handler(mockRequest({ method: 'GET', url: `${ROUTE}?${query}` }), response);
+  assert.equal(response.state.status, 200);
+  assert.deepEqual(calls.find(([name]) => name === 'activityPage')[1], {
+    projectId: project.id, limit: '50', actorId: 'AGENT-PL-1', eventType: 'TASK_UPDATED', taskId: 'TASK-1',
+    cursor: { createdAt: '2026-10-23T00:00:00.000Z', id: 'ACTIVITY-1' },
+  });
+  assert.equal(calls.some(([name]) => name === 'snapshot'), false);
 });
 
 test('POST requires an application/json Content-Type', async () => {
@@ -219,6 +240,21 @@ test('global actions use the authenticated owner identity and ignore body actors
   }), created);
   assert.equal(created.state.status, 200);
   assert.equal(calls.find(([name]) => name === 'createProject')[1].ownerId, 'owner-peer-1');
+});
+
+test('delete-project is owner-clamped and clears the cached runtime parent after deletion', async () => {
+  const { calls, handler, project } = httpFixture();
+  const response = mockResponse();
+  await handler(mockRequest({
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: {
+      action: 'delete-project', projectId: project.id, expectedVersion: project.version,
+      confirmation: project.id, actor: { type: 'human', id: 'attacker' },
+    },
+  }), response);
+  assert.equal(response.state.status, 200);
+  assert.deepEqual(calls.find(([name]) => name === 'deleteProject')[1].actor, { type: 'human', id: project.ownerId });
+  assert.deepEqual(calls.find(([name]) => name === 'forgetProjectParent'), ['forgetProjectParent', project.id]);
 });
 
 test('free-text verification commands are refused at the HTTP boundary', async () => {
@@ -350,6 +386,7 @@ test('arbitrary permission strings cannot expand a role template', async () => {
       members: [
         { id: leadAgentId, displayName: 'Project Lead', providerKey: 'harness:deepseek-official', role: 'PROJECT_LEAD', permissions: ['project:read'] },
         { id: 'AGENT-W1', displayName: 'Worker', providerKey: 'subagent:fork', role: 'WORKER', permissions: ['task:execute-assigned', 'omnipotence:*'] },
+        { id: 'AGENT-R1', displayName: 'Reviewer', providerKey: 'subagent:fork', role: 'REVIEWER', permissions: ['project:read'] },
       ],
     }), (error) => error.code === 'INVALID_PERMISSIONS');
   } finally {

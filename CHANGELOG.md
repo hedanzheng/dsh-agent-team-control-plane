@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.6.0 - 2026-10-23
+
+- Added an optional Worker Runtime selector to Project creation. Leaving it on automatic resolves the first Human-authorized, Host-reported external Worker and persists the effective choice on the Project.
+- Upgraded the database to schema v9 and migrated existing active Projects from their current non-replaced Worker assignment.
+- Made Charter team proposals use the Project's persisted Worker Runtime instead of silently choosing a new provider at approval time.
+- Displayed the configured PL/Worker runtimes in Project and team summaries while keeping `fork`/`spawn` labeled as launch modes rather than model names.
+- Removed the redundant header action for returning to the PL conversation; the Harness sidebar remains the navigation source, while the Project page retains only the recovery action for a PL conversation that failed to be created.
+- Added a same-workspace warning and concise failed-Run guidance that directs diagnosis to the Project PL without adding an automatic retry subsystem.
+- Kept token/cost estimates out of the panel when the Host does not report authoritative usage; subscription-based local runtimes are not converted into fictitious API costs.
+
+## 0.5.8 - 2026-10-23
+
+- Added an owner-only permanent Project record deletion flow for stopped, completed, and not-yet-active Projects. It removes the Project's complete Control Plane graph while preserving workspace files and the Harness PL conversation.
+- Added version and exact Project-ID confirmation gates, active-Run checks, a minimal global deletion tombstone, and cleanup of cached PL runtime parents.
+- Fixed cascading deletion of Task DAGs whose dependency edges intentionally use `ON DELETE RESTRICT` during ordinary Task operations.
+- Normalized and rejected non-absolute workspace paths when a Project is created.
+- Exposed Project completion blockers before the owner attempts final acceptance and hardened team role/runtime invariants.
+
 ## 0.5.7 - 2026-10-21
 
 - Added Human-owned `STOPPED → ACTIVE` Project recovery while retaining cancelled Task and Agent replacement audit history.

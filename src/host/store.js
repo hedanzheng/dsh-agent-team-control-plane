@@ -3,7 +3,7 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { DEFAULT_ROLE_PERMISSIONS, json, parseJson } from '../shared/contracts.js';
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 9;
 
 function mapProject(row) {
   if (!row) return undefined;
@@ -13,6 +13,7 @@ function mapProject(row) {
     ownerId: row.owner_id,
     leadAgentId: row.lead_agent_id,
     leadRuntimeKey: row.lead_runtime_key,
+    workerRuntimeKey: row.worker_runtime_key ?? null,
     workspaceDir: row.workspace_dir,
     initialGoal: row.initial_goal,
     charterVersion: row.charter_version,
@@ -281,6 +282,21 @@ function mapDecision(row) {
   };
 }
 
+function mapActivity(row) {
+  if (!row) return undefined;
+  return {
+    id: row.id,
+    operationId: row.operation_id,
+    projectId: row.project_id,
+    eventType: row.event_type,
+    actorId: row.actor_id,
+    objectRef: row.object_ref,
+    taskId: row.task_id ?? null,
+    summary: row.summary,
+    createdAt: row.created_at,
+  };
+}
+
 function mapRequestRun(row) {
   if (!row) return undefined;
   return {
@@ -333,6 +349,7 @@ export class ControlPlaneStore {
         owner_id TEXT NOT NULL,
         lead_agent_id TEXT,
         lead_runtime_key TEXT NOT NULL REFERENCES runtime_sources(provider_key),
+        worker_runtime_key TEXT REFERENCES runtime_sources(provider_key),
         workspace_dir TEXT NOT NULL,
         initial_goal TEXT NOT NULL,
         charter_version INTEGER NOT NULL DEFAULT 0,
@@ -672,6 +689,25 @@ export class ControlPlaneStore {
     if (!projectColumns.has('pl_session_id')) {
       this.db.exec('ALTER TABLE projects ADD COLUMN pl_session_id TEXT');
     }
+    if (!projectColumns.has('worker_runtime_key')) {
+      this.db.exec('ALTER TABLE projects ADD COLUMN worker_runtime_key TEXT REFERENCES runtime_sources(provider_key)');
+      // Existing Projects predate an explicit Worker-runtime preference. Where
+      // a team already exists, preserve the effective Worker assignment as the
+      // Project default. Earlier-stage Projects remain NULL and use the normal
+      // authorized-runtime default when their Charter is approved.
+      this.db.exec(`
+        UPDATE projects
+        SET worker_runtime_key = (
+          SELECT provider_key FROM agents
+          WHERE agents.project_id = projects.id
+            AND agents.role = 'WORKER'
+            AND agents.status <> 'REPLACED'
+          ORDER BY agents.created_at, agents.id
+          LIMIT 1
+        )
+        WHERE worker_runtime_key IS NULL
+      `);
+    }
     // R2.1: capture the workspace baseline before a write Run and the observed
     // diff afterwards, so Task scope compliance can be checked against actual
     // filesystem changes rather than only Worker-reported artifacts.
@@ -681,6 +717,42 @@ export class ControlPlaneStore {
     }
     if (!runColumns.has('workspace_diff_json')) {
       this.db.exec('ALTER TABLE task_runs ADD COLUMN workspace_diff_json TEXT');
+    }
+    // R5: Activity is read with a bounded, project-scoped keyset query. Keep a
+    // structured Task relation where one can be established from Host facts;
+    // never infer it in the browser from free-form summaries.
+    const activityColumns = new Set(this.db.prepare('PRAGMA table_info(activities)').all().map((column) => column.name));
+    const activityTaskColumnAdded = !activityColumns.has('task_id');
+    if (activityTaskColumnAdded) {
+      this.db.exec('ALTER TABLE activities ADD COLUMN task_id TEXT');
+    }
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS activities_project_created_id
+        ON activities(project_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS activities_project_actor_created_id
+        ON activities(project_id, actor_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS activities_project_type_created_id
+        ON activities(project_id, event_type, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS activities_project_task_created_id
+        ON activities(project_id, task_id, created_at DESC, id DESC);
+    `);
+    if (activityTaskColumnAdded) {
+      this.db.exec(`
+        UPDATE activities SET task_id = object_ref
+        WHERE task_id IS NULL AND object_ref IN (SELECT id FROM tasks);
+        UPDATE activities SET task_id = (SELECT task_id FROM task_runs WHERE task_runs.id = activities.object_ref)
+        WHERE task_id IS NULL AND object_ref IN (SELECT id FROM task_runs);
+        UPDATE activities SET task_id = (SELECT task_id FROM results WHERE results.id = activities.object_ref)
+        WHERE task_id IS NULL AND object_ref IN (SELECT id FROM results);
+        UPDATE activities SET task_id = (SELECT source_task_id FROM requests WHERE requests.id = activities.object_ref)
+        WHERE task_id IS NULL AND object_ref IN (SELECT id FROM requests);
+        UPDATE activities SET task_id = (SELECT task_id FROM reviews WHERE reviews.id = activities.object_ref)
+        WHERE task_id IS NULL AND object_ref IN (SELECT id FROM reviews);
+        UPDATE activities SET task_id = (SELECT task_id FROM review_runs WHERE review_runs.id = activities.object_ref)
+        WHERE task_id IS NULL AND object_ref IN (SELECT id FROM review_runs);
+        UPDATE activities SET task_id = (SELECT discovered_in_task_id FROM findings WHERE findings.id = activities.object_ref)
+        WHERE task_id IS NULL AND object_ref IN (SELECT id FROM findings);
+      `);
     }
     // R1.3: migrations must never re-expand permissions that were previously
     // narrowed. Prune any permission outside the frozen role template; never
@@ -742,7 +814,20 @@ export class ControlPlaneStore {
   }
 
   listProjects() {
-    return this.db.prepare('SELECT * FROM projects ORDER BY created_at').all().map(mapProject);
+    return this.db.prepare('SELECT * FROM projects ORDER BY created_at, id').all().map(mapProject);
+  }
+
+  deleteProject(projectId) {
+    // Project-owned records use ON DELETE CASCADE. Activity deliberately has no
+    // Project foreign key because it also stores system-wide events, so remove
+    // the Project activity stream explicitly before deleting the root row.
+    // task_dependencies uses RESTRICT for dependency_task_id to protect normal
+    // Task edits; remove both sides of this Project's DAG before root cascade.
+    this.db.prepare('DELETE FROM activities WHERE project_id=?').run(projectId);
+    this.db.prepare(`DELETE FROM task_dependencies
+      WHERE task_id IN (SELECT id FROM tasks WHERE project_id=?)
+         OR dependency_task_id IN (SELECT id FROM tasks WHERE project_id=?)`).run(projectId, projectId);
+    return this.db.prepare('DELETE FROM projects WHERE id=?').run(projectId);
   }
 
   getInterview(projectId) {
@@ -829,24 +914,72 @@ export class ControlPlaneStore {
   }
 
   appendActivity(activity) {
-    this.db.prepare(`INSERT INTO activities(id, operation_id, project_id, event_type, actor_id, object_ref, summary, created_at)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?)`).run(
+    const taskId = activity.taskId ?? this.resolveActivityTaskId(activity.objectRef);
+    this.db.prepare(`INSERT INTO activities(id, operation_id, project_id, event_type, actor_id, object_ref, task_id, summary, created_at)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       activity.id, activity.operationId, activity.projectId ?? null, activity.eventType,
-      activity.actorId, activity.objectRef, activity.summary, activity.createdAt,
+      activity.actorId, activity.objectRef, taskId, activity.summary, activity.createdAt,
     );
   }
 
+  resolveActivityTaskId(objectRef) {
+    if (!objectRef) return null;
+    const lookups = [
+      ['SELECT id AS task_id FROM tasks WHERE id=?', objectRef],
+      ['SELECT task_id FROM task_runs WHERE id=?', objectRef],
+      ['SELECT task_id FROM results WHERE id=?', objectRef],
+      ['SELECT source_task_id AS task_id FROM requests WHERE id=?', objectRef],
+      ['SELECT task_id FROM reviews WHERE id=?', objectRef],
+      ['SELECT task_id FROM review_runs WHERE id=?', objectRef],
+      ['SELECT discovered_in_task_id AS task_id FROM findings WHERE id=?', objectRef],
+    ];
+    for (const [sql, value] of lookups) {
+      const row = this.db.prepare(sql).get(value);
+      if (row?.task_id) return row.task_id;
+    }
+    return null;
+  }
+
   listActivities(projectId) {
-    return this.db.prepare('SELECT * FROM activities WHERE project_id = ? ORDER BY created_at, id').all(projectId).map((row) => ({
-      id: row.id,
-      operationId: row.operation_id,
-      projectId: row.project_id,
-      eventType: row.event_type,
-      actorId: row.actor_id,
-      objectRef: row.object_ref,
-      summary: row.summary,
-      createdAt: row.created_at,
-    }));
+    return this.db.prepare('SELECT * FROM activities WHERE project_id = ? ORDER BY created_at, id').all(projectId).map(mapActivity);
+  }
+
+  listRecentActivities(projectId, limit = 10) {
+    const bounded = Math.max(1, Math.min(50, Number(limit) || 10));
+    return this.db.prepare('SELECT * FROM activities WHERE project_id = ? ORDER BY created_at DESC, id DESC LIMIT ?')
+      .all(projectId, bounded).map(mapActivity).reverse();
+  }
+
+  listActivityPage({ projectId, limit = 50, cursor = null, actorId = '', eventType = '', taskId = '' }) {
+    const bounded = Math.max(1, Math.min(100, Number(limit) || 50));
+    const where = ['project_id = ?'];
+    const args = [projectId];
+    if (cursor?.createdAt && cursor?.id) {
+      where.push('(created_at < ? OR (created_at = ? AND id < ?))');
+      args.push(cursor.createdAt, cursor.createdAt, cursor.id);
+    }
+    if (actorId) { where.push('actor_id = ?'); args.push(actorId); }
+    if (eventType) { where.push('event_type = ?'); args.push(eventType); }
+    if (taskId) { where.push('task_id = ?'); args.push(taskId); }
+    const rows = this.db.prepare(`SELECT * FROM activities WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC LIMIT ?`)
+      .all(...args, bounded + 1);
+    const hasMore = rows.length > bounded;
+    const items = rows.slice(0, bounded).map(mapActivity);
+    const last = items.at(-1);
+    return {
+      items,
+      hasMore,
+      nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+    };
+  }
+
+  activityFacets(projectId) {
+    return {
+      actors: this.db.prepare('SELECT actor_id AS value, COUNT(*) AS count FROM activities WHERE project_id=? GROUP BY actor_id ORDER BY actor_id')
+        .all(projectId),
+      eventTypes: this.db.prepare('SELECT event_type AS value, COUNT(*) AS count FROM activities WHERE project_id=? GROUP BY event_type ORDER BY event_type')
+        .all(projectId),
+    };
   }
 
   taskDependencies(taskId) {
@@ -1002,7 +1135,9 @@ export class ControlPlaneStore {
         charters: this.listCharters(selected.id),
         agents: this.listAgents(selected.id),
         approvals: this.listApprovals(selected.id),
-        activities: this.listActivities(selected.id),
+        // Overview/PL state only needs a bounded recent tail. The Activity tab
+        // uses listActivityPage() and never downloads the full audit table.
+        activities: this.listRecentActivities(selected.id, 10),
         tasks: this.listTasks(selected.id),
         taskProposals: this.listTaskProposals(selected.id),
         taskStateEvents: this.listTaskStateEvents(selected.id),

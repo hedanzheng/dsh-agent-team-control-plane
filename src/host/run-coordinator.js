@@ -260,11 +260,18 @@ export class TaskRunCoordinator {
     const diff = this.workspaceDiffer(before, after);
     const classification = this.workspaceClassifier(spec.project.workspaceDir, diff, spec.task.scope);
     const changeKind = (path) => (diff.added.includes(path) ? 'added' : diff.modified.includes(path) ? 'modified' : 'deleted');
+    const changedPaths = [...diff.added, ...diff.modified, ...diff.deleted];
+    const linkChanges = changedPaths.filter((path) => before.get(path)?.symlink || after.get(path)?.symlink);
+    const alreadyFailed = new Set([...classification.forbidden, ...classification.outOfScope]);
     const scopeEvidence = [
       ...classification.forbidden.map((path) => ({ kind: 'FILE', ref: path, status: 'FAILED', details: { reason: 'forbidden scope modification', change: changeKind(path), scope: 'forbidden' } })),
       ...classification.outOfScope.map((path) => ({ kind: 'FILE', ref: path, status: 'FAILED', details: { reason: 'out-of-scope modification', change: changeKind(path), scope: 'out-of-scope' } })),
+      ...linkChanges.filter((path) => !alreadyFailed.has(path)).map((path) => ({
+        kind: 'FILE', ref: path, status: 'FAILED',
+        details: { reason: 'symbolic link or junction modification', change: changeKind(path), scope: 'unsafe-link' },
+      })),
     ];
-    return { diff, classification, scopeEvidence, after };
+    return { diff, classification: { ...classification, unsafeLinks: linkChanges }, scopeEvidence, after };
   }
 
   async persistTerminal(spec, parsed, runtimeResult, verificationRuns = [], artifactEvidence = [], explicitError = null) {

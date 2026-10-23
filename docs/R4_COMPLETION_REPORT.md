@@ -1,5 +1,7 @@
 # R4 完成报告
 
+> **2026-10-23 复核说明**：本报告的 Human 主流程证据继续有效，但“卸载重装、SQLite 备份恢复未执行”以及验收 Project 状态收尾仍是明确遗留，故应理解为“核心流程已通过、完整运维闭环待补”，不是无条件完成。后续 R5 已按统一任务书重新实现并记录于 `R5_COMPLETION_REPORT.md`。
+
 ## 环境
 - Git SHA / Branch：`main` @ `454b001`（R3 完成 + R4 复盘修复）
 - DeepSeek Harness 版本：Electron `44.7.0`（DSH Desktop `0.2.x`）

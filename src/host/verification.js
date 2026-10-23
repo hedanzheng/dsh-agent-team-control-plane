@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 
@@ -65,6 +65,7 @@ async function sha256(path) {
 
 export async function verifyArtifacts(workspace, task, artifacts) {
   const root = resolve(workspace);
+  const canonicalRoot = await realpath(root);
   const evidence = [];
   for (const ref of artifacts) {
     const target = isAbsolute(ref) ? resolve(ref) : resolve(root, ref);
@@ -74,10 +75,14 @@ export async function verifyArtifacts(workspace, task, artifacts) {
     try {
       if (!inside(root, target)) throw new Error('artifact escapes workspace');
       if (!inAllowedScope(root, relativePath, task.scope)) throw new Error('artifact is outside Task allowed scope or matches forbidden scope');
-      const info = await stat(target);
+      const linkInfo = await lstat(target);
+      if (linkInfo.isSymbolicLink()) throw new Error('artifact is a symbolic link or junction');
+      const canonicalTarget = await realpath(target);
+      if (!inside(canonicalRoot, canonicalTarget)) throw new Error('artifact resolves outside workspace through a symbolic link or junction');
+      const info = await stat(canonicalTarget);
       if (!info.isFile()) throw new Error('artifact is not a regular file');
       status = 'VERIFIED';
-      details = { absolutePath: target, relativePath, size: info.size, sha256: await sha256(target) };
+      details = { absolutePath: target, canonicalPath: canonicalTarget, relativePath, size: info.size, sha256: await sha256(canonicalTarget) };
     } catch (error) {
       details = { absolutePath: target, relativePath, error: error instanceof Error ? error.message : String(error) };
     }

@@ -1,9 +1,9 @@
 {
   "name": "@local/agent-team-control-plane",
-  "version": "0.5.7",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
-  "description": "Agent Team Control Plane MVP Phase 5 for DeepSeek Harness Desktop",
+  "description": "Host-backed Agent Team Control Plane for DeepSeek Harness Desktop",
   "engines": {
     "dsh": "0.2.1-rc.2"
   },

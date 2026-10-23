@@ -11,7 +11,7 @@ dsh plugin add github:hedanzheng/dsh-agent-team-control-plane
 ```powershell
 npm test
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.5.3.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.6.0.tgz' --offline
 ```
 
 Restart the selected Harness profile after installation.
@@ -24,7 +24,7 @@ The database is stored at:
 %DSH_HOME%\agent-team-control-plane\control-plane.sqlite
 ```
 
-Current schema version: `4`.
+Current schema version: `9`. Migration is automatic and adds the Project↔PL Session binding, workspace-diff evidence, indexed Activity Task relations, and the persisted Worker Runtime selection. Back up the database before replacing an installed build.
 
 ## Backup
 

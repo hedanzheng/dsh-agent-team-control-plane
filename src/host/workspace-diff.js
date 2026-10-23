@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { lstatSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { pathMatchesScope } from './verification.js';
 
@@ -67,7 +67,7 @@ function walk(baseDir, dir, files) {
 
 function readlinkSafe(fullPath) {
   try {
-    return require('node:fs').readlinkSync(fullPath);
+    return readlinkSync(fullPath);
   } catch {
     return null;
   }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { ControlPlaneError } from '../../src/shared/contracts.js';
@@ -10,6 +10,7 @@ import { CollaborationGovernance } from '../../src/host/governance.js';
 import { TaskRunCoordinator } from '../../src/host/run-coordinator.js';
 import { classifyWorkspaceChanges, diffWorkspace, snapshotWorkspace } from '../../src/host/workspace-diff.js';
 import { RESULT_MARKERS } from '../../src/host/result-parser.js';
+import { verifyArtifacts } from '../../src/host/verification.js';
 
 const OWNER = { type: 'human', id: 'human-owner' };
 const operation = (prefix) => `${prefix}-${crypto.randomUUID()}`;
@@ -163,9 +164,54 @@ test('workspace snapshot excludes structural directories and SQLite database fil
   }
 });
 
+test('workspace snapshot records a junction without traversing it, and artifact verification rejects the escape', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'r2-link-root-'));
+  const outside = mkdtempSync(join(tmpdir(), 'r2-link-outside-'));
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(outside, 'secret.txt'), 'outside\n');
+    symlinkSync(outside, join(root, 'src', 'outside'), process.platform === 'win32' ? 'junction' : 'dir');
+    const snapshot = snapshotWorkspace(root);
+    assert.equal(snapshot.get('src/outside')?.symlink, true);
+    assert.equal(snapshot.has('src/outside/secret.txt'), false);
+    const evidence = await verifyArtifacts(root, { scope: { allowed: ['src/**'], forbidden: [] } }, ['src/outside/secret.txt']);
+    assert.equal(evidence[0].status, 'FAILED');
+    assert.match(evidence[0].details.error, /resolves outside workspace|symbolic link|junction/i);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // R2.1: actual workspace change set is checked, not just reported artifacts
 // ---------------------------------------------------------------------------
+
+test('R2.1: an in-scope junction added without being reported still downgrades SUCCESS', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'r2-link-run-'));
+  const outside = mkdtempSync(join(tmpdir(), 'r2-link-run-outside-'));
+  let fx;
+  try {
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'src', 'ok.js'), 'export {};\n');
+    writeFileSync(join(outside, 'secret.txt'), 'outside\n');
+    fx = await fixture(root, {
+      onStart: () => symlinkSync(outside, join(root, 'src', 'linked'), process.platform === 'win32' ? 'junction' : 'dir'),
+      output: success('finished', ['src/ok.js']),
+    });
+    const task = createTask(fx, 'T-link', ['src/**'], []);
+    const state = startRun(fx, task);
+    const run = state.selected.taskRuns.at(-1);
+    const result = await waitFor(() => fx.store.listResults(fx.projectId).find((item) => item.runId === run.id), 'link escape result');
+    assert.equal(result.outcome, 'PARTIAL');
+    assert.ok(result.unresolved.some((item) => /symbolic link or junction/i.test(item)));
+    assert.ok(fx.store.getTaskRun(run.id).workspaceDiff.scope.unsafeLinks.includes('src/linked'));
+  } finally {
+    await dispose(fx);
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
 
 test('R2.1: Worker that silently writes a forbidden file cannot reach VERIFIED', async () => {
   const root = mkdtempSync(join(tmpdir(), 'r2-forbidden-'));
