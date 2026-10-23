@@ -628,6 +628,87 @@ window.__ModuleLoader__.load({
               h('div', { style: styles.muted }, `操作者：${item.actorId} · 对象：${item.objectRef}`))))));
     }
 
+    // R5: Dashboard landing view. Aggregates project health, pending
+    // approvals, active runs, findings and recent activity into a single
+    // overview so the owner sees "what needs attention now" first.
+    function DashboardView({ data, selected, onNavigate }) {
+      const projects = data?.projects || [];
+      const scopedTasks = selected?.tasks?.filter((task) => task.status !== 'CANCELLED') || [];
+      const verified = scopedTasks.filter((task) => task.status === 'VERIFIED').length;
+      const openFindings = (selected?.findings || []).filter((finding) => finding.status !== 'CLOSED').length;
+      const openRequests = (selected?.requests || []).filter((item) => ['PENDING', 'IN_PROGRESS'].includes(item.status)).length;
+      const pendingPlanChecks = (selected?.planChecks || []).filter((item) => item.status === 'PENDING').length;
+      const activeRuns = (selected?.taskRuns || []).filter((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
+      const submittedTasks = (selected?.tasks || []).filter((task) => task.status === 'SUBMITTED');
+      const waitingTasks = (selected?.tasks || []).filter((task) => task.status === 'WAITING');
+      const recentActivities = [...(selected?.activities || [])].reverse().slice(0, 6);
+      const runtimes = data?.runtimes || [];
+      const authorizedRuntimes = runtimes.filter((runtime) => runtime.authorized).length;
+      const pendingApprovalProjects = projects.filter((project) => ['CHARTER_PENDING_APPROVAL', 'TEAM_PENDING_APPROVAL'].includes(project.status));
+      const interviewingProjects = projects.filter((project) => project.status === 'CHARTER_INTERVIEW');
+      const statCard = (label, count, hint, target) => h('button', {
+        type: 'button', 'data-testid': `dashboard-stat-${target}`,
+        onClick: () => onNavigate(target),
+        style: {
+          ...styles.card, flex: '1 1 160px', cursor: 'pointer', textAlign: 'left',
+          background: 'var(--dsw-alias-surface-raised)',
+        },
+      },
+        h('div', { style: { ...styles.muted } }, label),
+        h('div', { style: { fontSize: 24, fontWeight: 700, marginTop: 4 } }, count),
+        h('div', { style: { ...styles.muted, marginTop: 2 } }, hint));
+      const needsAttention = openFindings + openRequests + pendingPlanChecks + submittedTasks.length
+        + pendingApprovalProjects.length + interviewingProjects.length + waitingTasks.length;
+      return h('section', { style: styles.section, 'aria-labelledby': 'dashboard-heading', 'data-testid': 'view-dashboard' },
+        h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+          h('strong', { id: 'dashboard-heading' }, '总览'),
+          h('span', { style: styles.tag }, needsAttention > 0 ? `${needsAttention} 项待处理` : '暂无待处理事项')),
+        !data && h('div', { style: styles.card }, '正在读取 Host 状态…'),
+        data && h('div', null,
+          h('div', { style: { ...styles.row, alignItems: 'stretch', marginTop: 8 } },
+            statCard('进行中的项目', projects.filter((project) => project.status === 'ACTIVE').length, '点击查看当前项目', 'project'),
+            statCard('等待配置或批准', projects.filter((project) => ['CHARTER_INTERVIEW', 'CHARTER_PENDING_APPROVAL', 'TEAM_PENDING_APPROVAL'].includes(project.status)).length, '章程 / 团队批准队列', 'approvals'),
+            statCard('已停止（可恢复）', projects.filter((project) => project.status === 'STOPPED').length, '可恢复的项目', 'project'),
+            statCard('已完成', projects.filter((project) => project.status === 'COMPLETED').length, '历史验收记录', 'project')),
+          selected && h('div', { style: { ...styles.card, marginTop: 10 }, 'data-testid': 'dashboard-current-project' },
+            h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+              h('b', null, `当前项目：${selected.project.name}`),
+              h('span', { style: styles.tag }, projectStatusLabel(selected.project.status))),
+            h('div', { style: { ...styles.muted, marginTop: 4 } },
+              `任务验收 ${verified}/${scopedTasks.length}`
+              + (activeRuns.length ? ` · ${activeRuns.length} 个运行中` : '')
+              + (submittedTasks.length ? ` · ${submittedTasks.length} 个待审核` : '')
+              + (waitingTasks.length ? ` · ${waitingTasks.length} 个等待处理` : '')
+              + (openFindings ? ` · ${openFindings} 条未关闭 Finding` : '')
+              + (openRequests ? ` · ${openRequests} 个待响应 Request` : '')
+              + (pendingPlanChecks ? ` · ${pendingPlanChecks} 个 Plan Check 待处理` : '')),
+            h('div', { style: { ...styles.row, marginTop: 8 } },
+              h(Button, { 'data-testid': 'dashboard-goto-tasks', onClick: () => onNavigate('tasks') }, '查看任务'),
+              h(Button, { 'data-testid': 'dashboard-goto-approvals', onClick: () => onNavigate('approvals') }, '查看审批'),
+              h(Button, { 'data-testid': 'dashboard-goto-activity', onClick: () => onNavigate('activity') }, '查看活动'))),
+          !selected && h('div', { style: styles.card }, '创建并选择 Project 后显示当前项目进度。'),
+          (pendingApprovalProjects.length > 0 || interviewingProjects.length > 0) && h('div', { style: styles.card, 'data-testid': 'dashboard-pending-approvals' },
+            h('b', null, '待办批准'),
+            interviewingProjects.map((project) => h('div', { key: project.id, style: { ...styles.row, justifyContent: 'space-between', marginTop: 6 } },
+              h('span', null, `${project.name} · 需求访谈中`),
+              h(Button, { onClick: () => onNavigate('approvals') }, '去完成访谈'))),
+            pendingApprovalProjects.map((project) => h('div', { key: project.id, style: { ...styles.row, justifyContent: 'space-between', marginTop: 6 } },
+              h('span', null, `${project.name} · ${projectStatusLabel(project.status)}`),
+              h(Button, { onClick: () => onNavigate('approvals') }, '去批准')))),
+          h('div', { style: { ...styles.card, marginTop: 10 }, 'data-testid': 'dashboard-runtime-summary' },
+            h('b', null, '运行环境'),
+            h('div', { style: { ...styles.muted, marginTop: 4 } },
+              `共 ${runtimes.length} 个 · 已授权 ${authorizedRuntimes} 个`
+              + (activeRuns.length ? ` · ${activeRuns.length} 个 Worker Run 运行中` : '')),
+            activeRuns.length > 0 && h('div', { style: styles.muted },
+              activeRuns.map((run) => `${run.id}（${run.status}）`).join('、'))),
+          selected && recentActivities.length > 0 && h('div', { style: { ...styles.card, marginTop: 10 }, 'data-testid': 'dashboard-recent-activity' },
+            h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+              h('b', null, '最近活动'), h(Button, { 'data-testid': 'dashboard-goto-activity-full', onClick: () => onNavigate('activity') }, '全部')),
+            recentActivities.map((item) => h('div', { key: item.id, style: { ...styles.muted, marginTop: 5 } },
+              `${formatDateTime(item.createdAt)} · ${ACTIVITY_LABELS[item.eventType] || item.eventType} · ${item.summary}`)))));
+    }
+
     function ControlPlanePanel({ onClose, onOpenPLChat, defaultWorkspaceDir }) {
       const [data, setData] = React.useState(null);
       const [ownerId, setOwnerId] = React.useState('human-owner');
@@ -635,7 +716,7 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('');
       const [createMode, setCreateMode] = React.useState(false);
       const [selectedProjectId, setSelectedProjectId] = React.useState('');
-      const [activeView, setActiveView] = React.useState('project');
+      const [activeView, setActiveView] = React.useState('dashboard');
 
       const load = React.useCallback(async () => {
         const response = await fetch(selectedProjectId ? `${ROUTE}?projectId=${encodeURIComponent(selectedProjectId)}` : ROUTE);
@@ -684,8 +765,8 @@ window.__ModuleLoader__.load({
 
       const selected = data?.selected;
       const tabs = [
-        ['pl-chat', 'PL 工作台'], ['project', '项目'], ['agents', '团队'],
-        ['tasks', '任务'], ['approvals', '审批'], ['activity', '活动记录'],
+        ['dashboard', '总览'], ['pl-chat', 'PL 工作台'], ['project', '项目'],
+        ['agents', '团队'], ['tasks', '任务'], ['approvals', '审批'], ['activity', '活动记录'],
       ];
       const projectGroups = data ? [
         ['进行中的项目', ['ACTIVE']],
@@ -738,6 +819,7 @@ window.__ModuleLoader__.load({
       if (!data) view = h('div', { style: styles.card },
         h('p', null, error ? `Host 状态读取失败：${error}` : '正在读取 Host 状态…'),
         error && h(Button, { 'data-testid': 'retry-load', onClick: () => { setError(''); load().catch((e) => setError(e.message)); } }, '重试'));
+      else if (activeView === 'dashboard') view = h(DashboardView, { data, selected, onNavigate: setActiveView });
       else if (activeView === 'pl-chat') view = h(PLChatView, { selected, busy, onOpenPLChat: launchPLChat, onNavigate: setActiveView });
       else if (activeView === 'project') view = projectView;
       else if (activeView === 'agents') view = h('section', { 'aria-labelledby': 'agents-heading', 'data-testid': 'view-agents' },

@@ -277,6 +277,11 @@ test('Phase 5 client exposes all six Host-backed views without credential or cha
   for (const testId of ['view-pl-chat', 'view-project', 'view-agents', 'view-tasks', 'view-approvals', 'view-activity']) {
     assert.match(source, new RegExp(`data-testid': '${testId}`));
   }
+  // R5: dashboard overview is the landing view; the six original views stay.
+  assert.match(source, /data-testid': 'view-dashboard/);
+  assert.match(source, /useState\('dashboard'\)/);
+  assert.match(source, /dashboard-current-project/);
+  assert.match(source, /dashboard-pending-approvals/);
   assert.match(source, /fetch\(selectedProjectId/);
   assert.match(source, /ctx\.slots\.inject\('main'/);
   assert.match(source, /ctx\.slots\.inject\('sidebar\.panellist'/);
