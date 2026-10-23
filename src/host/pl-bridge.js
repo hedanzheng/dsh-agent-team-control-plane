@@ -155,16 +155,22 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         project_id: { type: 'string', required: true },
         title: { type: 'string', required: true },
         goal: { type: 'string', required: true },
-        scope_allowed: { type: 'array', required: true, items: { type: 'string' } },
-        scope_forbidden: { type: 'array', items: { type: 'string' } },
+        scope_allowed: { type: 'array', required: true, items: { type: 'string' }, description: 'Workspace-relative glob paths only (e.g. "src/**"). Host matches actual file changes against these globs; prose descriptions cause out-of-scope FAILED evidence.' },
+        scope_forbidden: { type: 'array', items: { type: 'string' }, description: 'Workspace-relative glob paths that must never be touched (e.g. "secrets/**").' },
         acceptance: { type: 'array', required: true, items: { type: 'string' } },
-        dependency_ids: { type: 'array', items: { type: 'string' } },
+        dependency_ids: { type: 'array', items: { type: 'string' }, description: 'IDs of prerequisite Tasks that must be VERIFIED first.' },
         control_level: { type: 'string', enum: ['ROUTINE', 'IMPORTANT', 'CRITICAL'] },
         review_policy: { type: 'string', enum: ['AUTO', 'PL', 'REVIEWER_PL'] },
       },
       bindParent,
       services,
       execute(args) {
+        // Guard against silently-dropped argument aliases: passing the wrong
+        // key (e.g. `dependencies` instead of `dependency_ids`) previously
+        // vanished without a trace, building Tasks with missing edges.
+        if (args.dependencies !== undefined) {
+          throw new ControlPlaneError('INVALID_INPUT', 'use dependency_ids (not dependencies); unknown argument names are not accepted', 400);
+        }
         const project = projectFor(controlPlane, args.project_id);
         return controlPlane.createTask({
           actor: { type: 'pl', id: project.leadAgentId },

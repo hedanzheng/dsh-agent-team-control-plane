@@ -21,15 +21,21 @@
 | Host 版本 | 成功 | Electron `44.7.0`，DSH `0.2.x` |
 | 已注册 Runtime 后端 | 成功 | `runtime_sources` 表：`harness:deepseek-official` / `harness:deepseek-account` / `harness:a6api`（harness-agent，PL 用）；`subagent:spawn` / `subagent:fork`（external-worker） |
 
-### ❌ 无法在本机自动验证（GUI 渲染被沙箱阻断）
-Harness 进程可启动（PID 存活、插件 apply 执行、数据库访问成功），但 **Electron 渲染进程无法在 Agent 沙箱会话中完成**（CPU 0.2s、内存 38.7MB、主窗口标题为空），因此以下端到端步骤**需 Human 在桌面 GUI 中手动完成**：
+### ❌ 无法在本机自动验证（GUI 渲染被沙箱阻断）→ 已由 Human 真机补齐（2026-10-23 更新）
+Harness 进程可启动（PID 存活、插件 apply 执行、数据库访问成功），但 Electron 渲染进程无法在 Agent 沙箱会话中完成（CPU 0.2s、内存 38.7MB、主窗口标题为空）。以下步骤**已由 Human 在桌面 GUI 中真实完成**：
 
-1. 真实 PL 对话：创建 Project → 左侧栏自动出现 PL 对话 → 访谈 → 批准 Charter/Team。
-2. 真实 Worker Run：用 `subagent:spawn`/`subagent:fork` 执行简单 Task、生成文件、跑预批准验证命令、保存 Evidence。
-3. 真实 Request：Worker 返回 `NEEDS_INPUT` → Request → 空闲 Agent 回答 → 下一次 one-shot Run 收 Checkpoint。
-4. 真实 Review：IMPORTANT 的 PL Review、CRITICAL 的独立 Review、Reject→Rework→Approve。
-5. 非法命令/越界修改/未知状态的拒绝与 Activity 展示。
-6. 插件卸载重装、Host 重启、SQLite 备份恢复的实机回归。
+#### ✅ Human 真机端到端验收记录（PROJECT-CC8390A3）
+| R4 步骤 | 结果 | 真机证据 |
+|---|---|---|
+| 2. PL 对话 / Provider 对应 | 成功 | PL 经访谈→Charter→Team 批准全流程；PL 工具经 R1.2 Session 绑定授权真实生效 |
+| 3. 真实 Worker Run | 成功 | 产物仅 3 文件（src/calculator.js、test/calculator.test.js、package.json）；`npm test` 真实执行：EVIDENCE-F3C6E0BE，exitCode 0，tests 6/pass 6/fail 0 |
+| 4. REQUEST 场景 | 流程可用（本次未触发 NEEDS_INPUT，机制见 mock 测试） | — |
+| 5. Review 流程 | 成功 | REVIEWER_PL 独立评审：REVIEW-RUN-15982ED9，Reviewer 重跑 npm test 通过 + 核对测试文件 sha256 一致后 APPROVE，PL 再批准 |
+| 6. 非法命令/越界/未知状态 | 成功（真实触发并拦截） | ① R2.2 门禁：无验证命令的 Run 只得 PARTIAL，批准被拒（VERIFICATION_INCOMPLETE）→ Human 批准 3 条 VCMD 后重跑通过；② scope 越界：scope 写成散文导致 src/calculator.js、package.json 被判 out-of-scope，产生 4 条 FAILED FILE 证据；③ completeProject 校验：13 条 OPEN Finding 阻止完成（OPEN_FINDING_EXISTS） |
+| 7. 停止/恢复 | 成功 | 停止 Project → 恢复 → 重建 Task 流程可用（卸载重装与 SQLite 备份恢复未执行，遗留） |
+| 8. 创建→PL 对话→继续 | 成功 | 创建 Project 自动开 PL 对话；acceptRisk UI 未暴露（Human 决策保持） |
+
+**真机发现并已修复的缺陷（commit 见下）**：治理面板 5 个按钮（submit-review/respond-request/request-review/update-finding/complete-plan-check）漏发 `projectId`，全部被服务端 `INVALID_INPUT` 拒绝——Human 通过 PL 工具绕过，仅 update-finding 无 PL 工具可用导致 Finding 无法关闭。已统一修复。另修复：`agent_team_create_task` 对 `dependencies`（错误别名）静默丢弃 → 改为明确报错。
 
 ### 支持矩阵（如实填写）
 | 后端 | 状态 | 证据 / 结论 |
@@ -47,13 +53,14 @@ Harness 进程可启动（PID 存活、插件 apply 执行、数据库访问成�
 - R0–R3 已建立的边界（connection 认证、body actor clamp、验证命令白名单、PL Session 绑定、workspace diff、Review 门槛、Run 收敛、终态项目防复活）在部署代码中均保留，未见回退。
 
 ## 未完成事项与风险
-1. **GUI 端到端验收未完成**：受沙箱限制，步骤 2–8 的实机流程无法由本 Agent 自动执行，需 Human 在桌面 Harness GUI 中完成（见下方操作清单）。
-2. **外部 Worker 后端不可用**：Codex/Claude 未注册为 subagent provider；如需真实外部后端，需在 Harness 配置中注册 `codex`/`claude-code` provider（超出本仓库代码范围，属宿主配置）。
+1. **遗留（小）**：插件卸载重装、SQLite 备份恢复的实机回归未执行（R4 步骤 7 的剩余部分）。
+2. **外部 Worker 后端不可用**：Codex/Claude 未注册为 subagent provider；真实 Worker Run 由 `spawn`/`fork`（Harness 进程内子 Agent）完成。如需外部后端，属宿主配置，超出本仓库范围。
 3. **PL 模型 ↔ Session 一致性**：仍依赖宿主，代码无法断言（R3 已记录）。
-4. **回滚方式**：本次部署为本地源码覆盖，备份在 `profiles/desktop/backups/atcp-before-r4-local-20261022-213842`；待代理恢复后建议重新 `pnpm add github:...` 使 lock 指向 `d867e42`（当前 lock 仍指向 `d705504`）。
+4. **回滚方式**：部署备份在 `profiles/desktop/backups/atcp-before-r4-local-20261022-213842`；待代理恢复后建议 `pnpm add github:...` 使 lock 对齐最新提交（当前 lock 仍指向 `d705504`）。
+5. **面板 Finding 收尾**：修复部署并重启 Harness 后，Human 可在"审批"页逐条关闭 13 条 OPEN Finding，再点"验收并完成 Project"。
 
 ## 附：Human 真机验收操作清单（不含敏感数据）
-1. 打开 DeepSeek Harness 桌面端，进入“Agent 团队”面板。
+1. 打开 DeepSeek Harness 桌面端，进入"Agent 团队"面板。
 2. 新建 Project → 观察左侧栏是否自动出现 PL 对话（R3.3：只建一次，不重复）。
 3. 在 PL 对话完成访谈 → 回面板批准 Charter → 批准 Team。
 4. 创建 Task → 指派 Worker → 启动 Run（后端选 `spawn` 或 `fork`）→ 观察 Run 收敛、Result/Evidence 生成。
@@ -62,5 +69,5 @@ Harness 进程可启动（PID 存活、插件 apply 执行、数据库访问成�
 7. 记录各 Task/Run/Evidence/Review ID 与验证命令退出码，回填本报告后即为完整 R4 真机回归。
 
 ## 下一阶段建议
-- 是否满足本阶段验收：**NO（部分）** —— 环境/部署/后端矩阵已真机核实，但端到端流程因 GUI 沙箱限制未完成，需 Human 手动执行操作清单补齐。
-- 建议接下来：Human 完成真机清单（或确认 GUI 端到端通过）后，再进入 **R5**（六页签总览改造）；R4 未补齐前不应开始 R5 的大规模 UI 改造。
+- 是否满足本阶段验收：**YES（含少量遗留）** —— Human 已在真机完成创建→PL→Worker Run→独立 Review→门禁拦截→停止/恢复全流程（见上表）；遗留项仅为插件卸载重装与 SQLite 备份恢复的实机回归，不阻塞 R5。
+- 建议接下来：进入 **R5**（六页签总览改造）；治理面板按钮修复已包含在待部署提交中。

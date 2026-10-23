@@ -537,7 +537,7 @@ window.__ModuleLoader__.load({
       const reviewer = selected.agents.find((agent) => agent.role === 'REVIEWER' && !['REPLACED', 'UNAVAILABLE'].includes(agent.status));
       const evidenceFor = (task) => (selected.results.find((item) => item.id === task.resultId)?.evidenceRefs || []).slice(0, 4);
       const review = (task, actor, decision) => act('submit-review', {
-        actor, taskId: task.id, decision,
+        actor, projectId: selected.project.id, taskId: task.id, decision,
         issues: decision === 'REJECT' ? [reviewIssue.trim() || 'Revision required by reviewer'] : [],
         evidenceRefs: evidenceFor(task),
       });
@@ -564,7 +564,7 @@ window.__ModuleLoader__.load({
                 h('input', { style: styles.input, value: responseBody, placeholder: '受限 RESPONSE', 'data-testid': 'request-response-body', onChange: (event) => setResponseBody(event.target.value) }),
                 h(Button, {
                   disabled: busy || !responseBody.trim() || Boolean(target?.currentTaskId), 'data-testid': `respond-${requestItem.id}`,
-                  onClick: () => act('respond-request', { actor: { type: target?.role === 'PROJECT_LEAD' ? 'pl' : 'agent', id: requestItem.toAgentId }, requestId: requestItem.id, outcome: 'ANSWER', body: responseBody.trim(), evidenceRefs: [] }),
+                  onClick: () => act('respond-request', { actor: { type: target?.role === 'PROJECT_LEAD' ? 'pl' : 'agent', id: requestItem.toAgentId }, projectId: selected.project.id, requestId: requestItem.id, outcome: 'ANSWER', body: responseBody.trim(), evidenceRefs: [] }),
                 }, target?.currentTaskId ? '接收者忙，保持排队' : '接收者提交 RESPONSE')));
           })),
         submitted.length > 0 && h('div', { style: styles.section, 'data-testid': 'review-queue' },
@@ -579,7 +579,7 @@ window.__ModuleLoader__.load({
                 h(Button, {
                   disabled: busy || ['STARTING', 'RUNNING'].includes(reviewRun?.status),
                   'data-testid': `request-review-${task.id}`,
-                  onClick: () => act('request-review', { actor: { type: 'human', id: ownerId }, taskId: task.id }),
+                  onClick: () => act('request-review', { actor: { type: 'human', id: ownerId }, projectId: selected.project.id, taskId: task.id }),
                 }, ['STARTING', 'RUNNING'].includes(reviewRun?.status) ? '独立 Reviewer 运行中' : '请求独立 Reviewer 运行')),
               !readOnly && task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && !reviewer && h('div', { style: styles.error }, '当前没有可用 Reviewer；请先在 Agents 中更换 Reviewer。'),
               reviewRun && h('div', { style: styles.muted }, `Review Run ${reviewRun.id} · ${reviewRun.status}${reviewRun.error ? ` · ${reviewRun.error.code}: ${reviewRun.error.message}` : ''}`),
@@ -592,14 +592,14 @@ window.__ModuleLoader__.load({
           [...findings].reverse().map((finding) => h('div', { key: finding.id, style: styles.card },
             h('div', { style: { ...styles.row, justifyContent: 'space-between' } }, h('b', null, `${finding.severity} · ${finding.id}`), h('span', { style: styles.tag }, finding.status)),
             h('div', null, finding.description),
-            !readOnly && finding.status !== 'CLOSED' && h(Button, { disabled: busy, onClick: () => act('update-finding', { actor: { type: 'pl', id: lead }, findingId: finding.id, status: 'CLOSED' }) }, 'PL 关闭')))),
+            !readOnly && finding.status !== 'CLOSED' && h(Button, { disabled: busy, onClick: () => act('update-finding', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, findingId: finding.id, status: 'CLOSED' }) }, 'PL 关闭')))),
         h('div', { style: styles.section, 'data-testid': 'plan-checks' },
           h('b', null, `Plan Checks · ${planChecks.length}`),
           planChecks.map((plan) => h('div', { key: plan.id, style: styles.card },
             h('div', null, h('b', null, plan.trigger), ` · ${plan.status}`),
             !readOnly && plan.status === 'PENDING' && h('div', null,
               h('input', { style: styles.input, value: planNotes, onChange: (event) => setPlanNotes(event.target.value) }),
-              h(Button, { disabled: busy, onClick: () => act('complete-plan-check', { actor: { type: 'pl', id: lead }, planCheckId: plan.id, decision: 'KEEP_PLAN', notes: planNotes }) }, 'KEEP PLAN'))))),
+              h(Button, { disabled: busy, onClick: () => act('complete-plan-check', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, planCheckId: plan.id, decision: 'KEEP_PLAN', notes: planNotes }) }, 'KEEP PLAN'))))),
         h('div', { style: styles.section, 'data-testid': 'decisions' },
           h('b', null, `Approved Decisions · ${decisions.length}`),
           decisions.map((item) => h('div', { key: item.id, style: styles.card }, h('b', null, item.title), h('div', null, item.body))),

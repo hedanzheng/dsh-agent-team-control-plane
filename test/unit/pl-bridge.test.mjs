@@ -156,6 +156,21 @@ test('free-text verification commands are rejected before any Run starts', async
   assert.equal(calls.some(([name]) => name === 'startTaskRun'), false);
 });
 
+test('the dependencies alias is rejected loudly, never silently dropped', async () => {
+  const { calls, tools, parentAgent } = fixture();
+  await assert.rejects(
+    named(tools, 'agent_team_create_task').execute({
+      project_id: project.id,
+      title: 'T1', goal: 'Design', scope_allowed: ['src/**'],
+      acceptance: ['contract written'],
+      dependencies: ['TASK-0'],
+    }, { agent: parentAgent }),
+    (error) => error.code === 'INVALID_INPUT',
+  );
+  // The misspelled call must not create a Task with missing edges.
+  assert.equal(calls.some(([name]) => name === 'createTask'), false);
+});
+
 test('PL review consumes authoritative Result evidence', async () => {
   const { calls, tools, parentAgent } = fixture();
   await named(tools, 'agent_team_review_task').execute({
