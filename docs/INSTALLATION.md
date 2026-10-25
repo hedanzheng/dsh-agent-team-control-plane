@@ -11,7 +11,7 @@ dsh plugin add github:hedanzheng/dsh-agent-team-control-plane
 ```powershell
 npm test
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.6.0.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.6.1.tgz' --offline
 ```
 
 Restart the selected Harness profile after installation.

@@ -24,6 +24,10 @@ function snapshot(extra = {}) {
       evidence: [],
       reviews: [],
       reviewRuns: [],
+      requests: [],
+      responses: [],
+      requestRuns: [],
+      taskProposals: [],
       findings: [],
       planChecks: [],
       activities: [],
@@ -42,12 +46,13 @@ function fixture(overrides = {}) {
   const plStatus = overrides.plStatus ?? 'IDLE';
   const controlPlane = {
     requireProject(id) { return projectRecord; },
-    requireTask(_project, id) { return { id, version: 2, resultId: 'RESULT-1' }; },
+    requireTask(_project, id) { return { id, version: 2, status: 'READY', resultId: 'RESULT-1' }; },
     requireProjectAgent(_project, id) { return { id, role: 'WORKER', status: 'IDLE' }; },
     snapshot(id) { calls.push(['snapshot', id]); return state; },
     answerInterview(input) { calls.push(['answerInterview', input]); return state; },
     createTask(input) { calls.push(['createTask', input]); return state; },
     assignTask(input) { calls.push(['assignTask', input]); return state; },
+    transitionTask(input) { calls.push(['transitionTask', input]); return state; },
     resolveVerificationCommands(projectId, commandIds) {
       calls.push(['resolveVerificationCommands', { projectId, commandIds }]);
       return commandIds.map((commandId) => ({ command: `approved:${commandId}`, timeoutMs: 120000 }));
@@ -57,6 +62,7 @@ function fixture(overrides = {}) {
     startTaskRun(input) { calls.push(['startTaskRun', input]); return state; },
   };
   const governance = {
+    respondRequest(input) { calls.push(['respondRequest', input]); return state; },
     submitReview(input) { calls.push(['submitReview', input]); return state; },
     requestIndependentReview(input) { calls.push(['requestIndependentReview', input]); return state; },
   };
@@ -93,6 +99,8 @@ test('PL bridge exposes state and workflow tools without Human approval actions'
     'agent_team_create_task',
     'agent_team_assign_task',
     'agent_team_start_task_run',
+    'agent_team_respond_request',
+    'agent_team_cancel_task',
     'agent_team_request_review',
     'agent_team_review_task',
   ]);
@@ -154,6 +162,64 @@ test('free-text verification commands are rejected before any Run starts', async
   // No command resolution and no Worker Run may be created.
   assert.equal(calls.some(([name]) => name === 'resolveVerificationCommands'), false);
   assert.equal(calls.some(([name]) => name === 'startTaskRun'), false);
+});
+
+test('a Worker Run without an approved verification command ID is rejected before start', async () => {
+  const { calls, tools, parentAgent } = fixture();
+  await assert.rejects(
+    named(tools, 'agent_team_start_task_run').execute({
+      project_id: project.id,
+      task_id: 'TASK-1',
+      verification_command_ids: [],
+    }, { agent: parentAgent }),
+    (error) => error.code === 'VERIFICATION_COMMAND_REQUIRED',
+  );
+  assert.equal(calls.some(([name]) => name === 'resolveVerificationCommands'), false);
+  assert.equal(calls.some(([name]) => name === 'startTaskRun'), false);
+});
+
+test('project state defaults to a compact summary and supports focused Task detail', async () => {
+  const state = snapshot({
+    tasks: [{ id: 'TASK-1', title: 'T1', status: 'WAITING', version: 2, assignedAgentId: 'AGENT-WORKER-1', dependencies: [], reviewPolicy: 'PL', resultId: null, waiting: { onRef: 'REQUEST-1' }, scope: { allowed: ['src/**'], forbidden: [] }, acceptance: ['done'] }],
+    taskRuns: [{ id: 'RUN-1', taskId: 'TASK-1', attempt: 1, status: 'TIMED_OUT', terminalKind: 'TIMED_OUT' }],
+    requests: [{ id: 'REQUEST-1', sourceTaskId: 'TASK-1', status: 'PENDING', toAgentId: project.leadAgentId, body: 'Need a decision' }],
+    verificationCommands: [{ id: 'VCMD-1', status: 'APPROVED', command: 'npm test' }],
+  });
+  const fx = fixture();
+  // Replace the fixture snapshot return while preserving its authorization setup.
+  const stateTool = named(createPLBridgeTools({
+    controlPlane: {
+      requireProject: () => fx.project,
+      snapshot: () => state,
+    },
+    coordinator: {}, governance: {},
+    store: { listAgents: () => [{ id: project.leadAgentId, role: 'PROJECT_LEAD', status: 'IDLE' }] },
+    adapters: { isLiveParent: (agent) => agent === fx.parentAgent, bindProjectParent() {} },
+  }), 'agent_team_project_state');
+  const summary = JSON.parse(await stateTool.execute({ project_id: project.id }, { agent: fx.parentAgent }));
+  assert.equal(summary.tasks[0].latestRun.id, 'RUN-1');
+  assert.equal(summary.openRequests[0].id, 'REQUEST-1');
+  assert.equal(summary.taskRuns, undefined);
+  const detail = JSON.parse(await stateTool.execute({ project_id: project.id, task_id: 'TASK-1' }, { agent: fx.parentAgent }));
+  assert.equal(detail.task.id, 'TASK-1');
+  assert.equal(detail.taskRuns.length, 1);
+});
+
+test('PL can answer an addressed Worker Request and cancel a superseded Task', async () => {
+  const { calls, tools, parentAgent } = fixture();
+  await named(tools, 'agent_team_respond_request').execute({
+    project_id: project.id,
+    request_id: 'REQUEST-1',
+    outcome: 'ANSWER',
+    body: 'Use the final contract and replace the placeholder assertion.',
+  }, { agent: parentAgent });
+  await named(tools, 'agent_team_cancel_task').execute({
+    project_id: project.id,
+    task_id: 'TASK-1',
+    reason: 'Superseded by a corrected Task',
+  }, { agent: parentAgent });
+  assert.deepEqual(calls.find(([name]) => name === 'respondRequest')[1].actor, { type: 'pl', id: project.leadAgentId });
+  assert.equal(calls.find(([name]) => name === 'transitionTask')[1].toStatus, 'CANCELLED');
 });
 
 test('the dependencies alias is rejected loudly, never silently dropped', async () => {
@@ -284,14 +350,15 @@ test('installation registers policy and disposes every registration', () => {
       answerInterview: () => snapshot(),
       createTask: () => snapshot(),
       assignTask: () => snapshot(),
+      transitionTask: () => snapshot(),
     },
     coordinator: { startTaskRun: () => snapshot() },
-    governance: { submitReview: () => snapshot(), requestIndependentReview: () => snapshot() },
+    governance: { submitReview: () => snapshot(), requestIndependentReview: () => snapshot(), respondRequest: () => snapshot() },
     store: { listAgents: () => [], getResult: () => ({ evidenceRefs: ['EVIDENCE-1'] }) },
     adapters: { isLiveParent: () => false, bindProjectParent() {} },
   });
-  assert.equal(registered.length, 8);
+  assert.equal(registered.length, 10);
   dispose();
-  assert.equal(disposed.length, 8);
+  assert.equal(disposed.length, 10);
   assert.equal(disposed.at(-1), 'agent_team_project_state');
 });

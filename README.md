@@ -7,7 +7,7 @@ An **A-version MVP** control-plane plugin for DeepSeek Harness Desktop. It turns
 ## Compatibility
 
 - Verified host: DeepSeek Harness Desktop `0.2.1-rc.2`
-- Package: `@local/agent-team-control-plane@0.6.0`
+- Package: `@local/agent-team-control-plane@0.6.1`
 - Runtime: the Node.js runtime bundled with the verified host (`node:sqlite` required)
 - Platform verified: Windows Desktop / PowerShell 5.1+
 
@@ -23,7 +23,9 @@ An **A-version MVP** control-plane plugin for DeepSeek Harness Desktop. It turns
 - Runtime failures stay terminal and visible for PL diagnosis instead of being blindly retried; token/cost data is shown only when the Host reports authoritative usage
 - Chinese Project states and Activity descriptions, with project-scoped server pagination (50 rows by default), Agent/type/reliable-Task filters, and raw technical details on demand
 - Project Decisions live under Project rather than Approvals; Charter-impacting changes still require the Human Owner
-- Seven Host-backed `agent_team_*` tools let the PL read and update authoritative control-plane state, including dispatching a real independent Reviewer Run
+- Nine Host-backed `agent_team_*` tools let the PL read and update authoritative state, answer Worker Requests, cancel superseded Tasks, and dispatch a real independent Reviewer Run
+- Worker Runs require a preselected Human-approved verification command; only the Human Owner can explicitly accept a PARTIAL/failed-evidence Result from the console
+- PL state reads return compact summaries by default and provide focused per-Task detail instead of repeatedly loading complete Run/Evidence history
 - The PL only interviews, plans, orchestrates, and reviews; implementation must flow through formal Tasks, Worker assignment, and one-shot Runs
 - Host-owned SQLite state for Charter, Agents, Tasks, Runs, Results, Evidence, Requests, Responses, Reviews, Findings, Plan Checks, Decisions, and Activity
 - DSH-managed subagent Worker activations (local `fork`/`spawn` or external providers) with explicit Checkpoint + new Run continuation
@@ -45,7 +47,7 @@ Or build a local package and install it offline:
 
 ```powershell
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.6.0.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.6.1.tgz' --offline
 ```
 
 The plugin is activated by `cordis.patch.yml`. Restart the target Harness profile after installation.

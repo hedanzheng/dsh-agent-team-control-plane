@@ -468,6 +468,18 @@ window.__ModuleLoader__.load({
           h('div', null, `${task.controlLevel} / ${task.reviewPolicy} · assignee ${task.assignedAgentId || 'none'}`),
           h('div', { style: styles.muted }, `Dependencies: ${task.dependencies.join(', ') || 'none'}`),
           task.waiting && h('div', { style: styles.muted }, `Waiting: ${task.waiting.reason} · ${task.waiting.onRef}`),
+          !readOnly && ['PENDING', 'READY', 'SUBMITTED'].includes(task.status) && h(Button, {
+            disabled: busy,
+            'data-testid': `cancel-task-${task.id}`,
+            onClick: () => {
+              if (!globalThis.confirm(`取消 Task「${task.title}」？\n\n历史记录和已有 Result 会保留；如需修正 scope 或依赖，请另建承接 Task。`)) return;
+              act('transition-task', {
+                actor: { type: 'pl', id: selected.project.leadAgentId }, projectId: selected.project.id,
+                taskId: task.id, expectedVersion: task.version, toStatus: 'CANCELLED',
+                reason: '由 PL 取消并保留审计历史；后续使用修正后的承接 Task',
+              });
+            },
+          }, '取消 / 取代 Task'),
           !readOnly && task.status === 'READY' && !task.assignedAgentId && workers.length > 0 && h('div', { style: { ...styles.row, marginTop: 7 } },
             h('select', {
               style: { ...styles.input, flex: 1, margin: 0 },
@@ -497,11 +509,11 @@ window.__ModuleLoader__.load({
                   value: commandByTask[task.id] || '',
                   'data-testid': `run-verification-commands-${task.id}`,
                   onChange: (event) => setCommandByTask({ ...commandByTask, [task.id]: event.target.value }),
-                }, [h('option', { key: '', value: '' }, '不使用验证命令（结果将始终为 PARTIAL）')]
+                }, [h('option', { key: '', value: '' }, '请选择验证命令（必选）')]
                   .concat(approvedCommands.map((command) => h('option', { key: command.id, value: command.id }, `${command.displayName} · ${command.id}`))))
-              : h('div', { style: styles.muted }, '尚无已批准验证命令；本次运行结果将始终为 PARTIAL。'),
+              : h('div', { style: styles.error }, '尚无已批准验证命令。请先在上方批准命令，之后才能启动 Run。'),
             h(Button, {
-              disabled: busy, 'data-testid': `start-run-${task.id}`,
+              disabled: busy || !commandByTask[task.id], 'data-testid': `start-run-${task.id}`,
               onClick: () => act('start-task-run', {
                 actor: { type: 'pl', id: selected.project.leadAgentId }, projectId: selected.project.id,
                 taskId: task.id, expectedVersion: task.version,
@@ -562,10 +574,11 @@ window.__ModuleLoader__.load({
       const lead = selected.project.leadAgentId;
       const reviewer = selected.agents.find((agent) => agent.role === 'REVIEWER' && !['REPLACED', 'UNAVAILABLE'].includes(agent.status));
       const evidenceFor = (task) => (selected.results.find((item) => item.id === task.resultId)?.evidenceRefs || []).slice(0, 4);
-      const review = (task, actor, decision) => act('submit-review', {
+      const review = (task, actor, decision, acceptRisk = false) => act('submit-review', {
         actor, projectId: selected.project.id, taskId: task.id, decision,
         issues: decision === 'REJECT' ? [reviewIssue.trim() || 'Revision required by reviewer'] : [],
         evidenceRefs: evidenceFor(task),
+        acceptRisk,
       });
       return h('div', { style: styles.section, 'data-testid': 'governance-panel' },
         h('strong', null, 'Requests · Reviews · Findings · Plan Checks'),
@@ -597,6 +610,9 @@ window.__ModuleLoader__.load({
           h('b', null, `Review Queue · ${submitted.length}`),
           !readOnly && h('input', { style: styles.input, value: reviewIssue, placeholder: 'Reject 时填写明确问题', 'data-testid': 'review-issue', onChange: (event) => setReviewIssue(event.target.value) }),
           submitted.map((task) => {
+            const result = selected.results.find((item) => item.id === task.resultId);
+            const resultEvidence = (selected.evidence || []).filter((item) => item.resultId === task.resultId);
+            const verificationIncomplete = result?.outcome !== 'SUCCESS' || resultEvidence.some((item) => item.status === 'FAILED');
             const reviewerApproved = reviews.some((item) => item.taskId === task.id && item.resultId === task.resultId && item.reviewerRole === 'REVIEWER' && item.decision === 'APPROVE');
             const reviewRun = [...reviewRuns].reverse().find((item) => item.taskId === task.id && item.resultId === task.resultId);
             return h('div', { key: task.id, style: styles.card, 'data-testid': 'review-record' },
@@ -610,8 +626,19 @@ window.__ModuleLoader__.load({
               !readOnly && task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && !reviewer && h('div', { style: styles.error }, '当前没有可用 Reviewer；请先在 Agents 中更换 Reviewer。'),
               reviewRun && h('div', { style: styles.muted }, `Review Run ${reviewRun.id} · ${reviewRun.status}${reviewRun.error ? ` · ${reviewRun.error.code}: ${reviewRun.error.message}` : ''}`),
               !readOnly && (task.reviewPolicy !== 'REVIEWER_PL' || reviewerApproved) && h('div', { style: styles.row },
-                h(Button, { disabled: busy, 'data-testid': `approve-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'APPROVE') }, 'PL 通过'),
-                h(Button, { disabled: busy, 'data-testid': `reject-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'REJECT') }, 'PL 退回')));
+                !verificationIncomplete && h(Button, { disabled: busy, 'data-testid': `approve-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'APPROVE') }, 'PL 通过'),
+                h(Button, { disabled: busy, 'data-testid': `reject-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'REJECT') }, 'PL 退回')),
+              !readOnly && verificationIncomplete && (task.reviewPolicy !== 'REVIEWER_PL' || reviewerApproved) && h('div', { style: { ...styles.card, borderColor: 'var(--dsw-alias-border-warning)' } },
+                h('b', null, 'Host 验证不完整'),
+                h('div', { style: styles.muted }, '仅 Human Owner 可明确接受 PARTIAL / FAILED evidence 风险并将 Task 验收为 VERIFIED。'),
+                h(Button, {
+                  disabled: busy,
+                  'data-testid': `owner-accept-risk-${task.id}`,
+                  onClick: () => {
+                    if (!globalThis.confirm(`Task ${task.id} 的 Host 验证不完整。\n\n确认由 Human Owner 接受该风险并验收？`)) return;
+                    review(task, { type: 'human', id: ownerId }, 'APPROVE', true);
+                  },
+                }, 'Owner 接受风险并验收')));
           })),
         h('div', { style: styles.section, 'data-testid': 'findings' },
           h('b', null, `Findings · ${findings.length}`),

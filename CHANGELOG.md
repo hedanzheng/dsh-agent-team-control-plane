@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 - 2026-10-25
+
+- Blocked Panel and PL-tool Worker Runs before launch unless at least one Human-approved verification command ID is selected, eliminating accidental permanently-PARTIAL submissions.
+- Added a visible Human Owner action for explicitly accepting incomplete Host verification, backed by the existing evidence-bound `acceptRisk` gate.
+- Added PL tools to answer an addressed Worker Request and cancel superseded PENDING/READY/SUBMITTED Tasks while retaining audit history.
+- Changed PL state reads and mutation responses to compact summaries by default, with focused per-Task detail and an explicit full view for exceptional diagnostics.
+- Clarified Task-authoring policy: every expected artifact belongs in `scope_allowed`, `scope_forbidden` is absolute, and design Tasks must not freeze deliberately failing placeholders into later-stage tests.
+- Added Panel recovery controls for Task cancellation/replacement and regression coverage for all reported Text Stats Smoke Test failure modes.
+
 ## 0.6.0 - 2026-10-23
 
 - Added an optional Worker Runtime selector to Project creation. Leaving it on automatic resolves the first Human-authorized, Host-reported external Worker and persists the effective choice on the Project.

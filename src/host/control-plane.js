@@ -18,10 +18,11 @@ import { isAbsolute, resolve } from 'node:path';
 const REVIEW_RANK = Object.freeze({ AUTO: 0, PL: 1, REVIEWER_PL: 2 });
 const MINIMUM_REVIEW = Object.freeze({ ROUTINE: 'AUTO', IMPORTANT: 'PL', CRITICAL: 'REVIEWER_PL' });
 const TASK_TRANSITIONS = Object.freeze({
+  PENDING: new Set(['CANCELLED']),
   READY: new Set(['RUNNING', 'FAILED', 'CANCELLED']),
   RUNNING: new Set(['WAITING', 'SUBMITTED', 'FAILED', 'CANCELLED']),
   WAITING: new Set(['READY', 'FAILED', 'CANCELLED']),
-  SUBMITTED: new Set(['VERIFIED', 'READY']),
+  SUBMITTED: new Set(['VERIFIED', 'READY', 'CANCELLED']),
 });
 
 function lines(value, field) {

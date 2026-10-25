@@ -310,6 +310,31 @@ test('R2.2: only Human Owner may accept the unverified risk explicitly', async (
   }
 });
 
+test('R2.4: PL may cancel a superseded SUBMITTED Task without deleting its Result history', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'r2-cancel-submitted-'));
+  let fx;
+  try {
+    fx = await fixture(root, { onStart: undefined, output: success('finished', ['src/ok.js']) });
+    const task = createTask(fx, 'T-cancel', ['src/**'], []);
+    seedResult(fx.store, task, 'PARTIAL', ['EVIDENCE-1'], [{ id: 'EVIDENCE-1', status: 'FAILED' }]);
+    const project = fx.store.getProject(fx.projectId);
+    const submitted = fx.store.getTask(task.id);
+    const resultId = submitted.resultId;
+    const state = fx.plane.transitionTask({
+      actor: { type: 'pl', id: project.leadAgentId }, operationId: operation('cancel-submitted'),
+      projectId: fx.projectId, taskId: submitted.id, expectedVersion: submitted.version,
+      toStatus: 'CANCELLED', reason: 'Superseded by corrected scope and dependency chain',
+    });
+    const cancelled = state.selected.tasks.find((item) => item.id === task.id);
+    assert.equal(cancelled.status, 'CANCELLED');
+    assert.equal(cancelled.resultId, resultId);
+    assert.ok(state.selected.results.some((item) => item.id === resultId));
+  } finally {
+    await dispose(fx);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('R2.2: transitionTask cannot bypass Result/Evidence gates to VERIFIED', async () => {
   const root = mkdtempSync(join(tmpdir(), 'r2-transition-'));
   let fx;

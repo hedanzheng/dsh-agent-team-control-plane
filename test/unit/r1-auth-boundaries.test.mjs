@@ -272,6 +272,18 @@ test('free-text verification commands are refused at the HTTP boundary', async (
   assert.equal(calls.some(([name]) => name === 'startTaskRun'), false);
 });
 
+test('HTTP boundary refuses to start a Run without an approved verification command ID', async () => {
+  const { calls, handler, project } = httpFixture();
+  const response = mockResponse();
+  await handler(mockRequest({
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: { action: 'start-task-run', projectId: project.id, verification_command_ids: [] },
+  }), response);
+  assert.equal(response.state.status, 409);
+  assert.equal(response.state.body.error.code, 'VERIFICATION_COMMAND_REQUIRED');
+  assert.equal(calls.some(([name]) => name === 'startTaskRun'), false);
+});
+
 test('unknown or revoked verification command IDs start no Run', async () => {
   const { calls, handler, project } = httpFixture();
   for (const commandId of ['VCMD-UNKNOWN', 'VCMD-REVOKED']) {

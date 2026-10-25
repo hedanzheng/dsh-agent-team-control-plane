@@ -7,7 +7,7 @@
 ## 兼容性
 
 - 已验证 Host：DeepSeek Harness Desktop `0.2.1-rc.2`
-- 包：`@local/agent-team-control-plane@0.6.0`
+- 包：`@local/agent-team-control-plane@0.6.1`
 - Runtime：已验证 Host 内置 Node.js，要求支持 `node:sqlite`
 - 已验证平台：Windows Desktop / PowerShell 5.1+
 
@@ -23,7 +23,9 @@
 - Runtime 失败后保留终态与诊断信息，由 Project PL 分析修复，不自动盲目重跑；只有 Host 提供可信数据时才显示 Token/成本，不估算订阅制本地模型费用
 - Project 状态和 Activity 主信息中文化；Activity 按 Project 服务端分页（默认 50 条），支持 Agent、事件类型和可靠 Task 关联筛选
 - Decision 位于“项目→项目决策记录”，不再混在审批队列；重大 Charter 影响仍由 Human Owner 确认
-- PL 对话通过七个 Host-backed `agent_team_*` 工具读取与更新真实控制面状态，并可派发真实的独立 Reviewer Run
+- PL 对话通过九个 Host-backed `agent_team_*` 工具读取与更新真实控制面状态，可回复 Worker Request、取消被取代的 Task，并可派发真实的独立 Reviewer Run
+- Worker Run 必须预选 Human 批准的验证命令；PARTIAL/失败证据只允许 Human Owner 在控制台明确接受风险，避免 Task 无入口地卡在 SUBMITTED
+- PL 状态读取默认返回紧凑摘要，需要诊断时再按 Task 读取明细，避免反复载入完整 Run/Evidence 历史
 - PL 只负责访谈、计划、编排与 Review；实现工作必须创建正式 Task、指派 Worker 并启动 one-shot Run
 - Host/SQLite 统一持久化 Charter、Agent、Task、Run、Result、Evidence、Request、Response、Review、Finding、Plan Check、Decision 与 Activity
 - 通过 DSH 托管 subagent activation 启动 Worker（本地 `fork`/`spawn` 或外部 provider），以 Checkpoint + 新 Run 恢复工作
@@ -45,7 +47,7 @@ dsh plugin add github:hedanzheng/dsh-agent-team-control-plane
 
 ```powershell
 npm pack
-dsh plugin add '.\local-agent-team-control-plane-0.6.0.tgz' --offline
+dsh plugin add '.\local-agent-team-control-plane-0.6.1.tgz' --offline
 ```
 
 插件通过 `cordis.patch.yml` 激活。安装完成后重启目标 Harness Profile。

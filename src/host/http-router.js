@@ -198,6 +198,9 @@ export function createControlPlaneHttpHandler({ controlPlane, coordinator, gover
           if (body.verificationCommands !== undefined) {
             throw new ControlPlaneError('VERIFICATION_COMMANDS_REJECTED', 'free-text verification commands are not accepted; approve a project command and pass verification_command_ids', 400);
           }
+          if (!Array.isArray(body.verification_command_ids) || body.verification_command_ids.length === 0) {
+            throw new ControlPlaneError('VERIFICATION_COMMAND_REQUIRED', 'approve and select at least one verification command before starting a Worker Run', 409);
+          }
           const verificationCommands = controlPlane.resolveVerificationCommands(project.id, body.verification_command_ids);
           data = coordinator.startTaskRun({ ...body, actor, verificationCommands, verification_command_ids: undefined });
           break;
