@@ -69,10 +69,9 @@ function selectedState(snapshot) {
   };
 }
 
-function compactTask(selected, task) {
-  const runs = selected.taskRuns.filter((item) => item.taskId === task.id);
-  const latestRun = runs.at(-1) ?? null;
-  const result = task.resultId ? selected.results.find((item) => item.id === task.resultId) ?? null : null;
+function compactTask(task, runByTask, resultById) {
+  const latestRun = runByTask.get(task.id) ?? null;
+  const result = task.resultId ? resultById.get(task.resultId) ?? null : null;
   return {
     id: task.id,
     title: task.title,
@@ -126,6 +125,9 @@ function compactState(snapshot, args = {}) {
       verificationCommands: selected.verificationCommands.filter((item) => item.status === 'APPROVED'),
     };
   }
+  const runByTask = new Map();
+  for (const run of selected.taskRuns) runByTask.set(run.taskId, run);
+  const resultById = new Map(selected.results.map((result) => [result.id, result]));
   return {
     project: selected.project,
     interview: selected.interview,
@@ -135,7 +137,7 @@ function compactState(snapshot, args = {}) {
       id: item.id, displayName: item.displayName, role: item.role, providerKey: item.providerKey,
       status: item.status, currentTaskId: item.currentTaskId,
     })),
-    tasks: selected.tasks.map((task) => compactTask(selected, task)),
+    tasks: selected.tasks.map((task) => compactTask(task, runByTask, resultById)),
     openRequests: selected.requests.filter((item) => ['PENDING', 'IN_PROGRESS'].includes(item.status)),
     pendingTaskProposals: selected.taskProposals.filter((item) => item.status === 'PENDING'),
     verificationCommands: selected.verificationCommands.filter((item) => item.status === 'APPROVED'),
@@ -183,10 +185,14 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
       bindParent,
       services,
       render(snapshotValue, args) {
-        return JSON.stringify(args.view === 'full' ? selectedState(snapshotValue) : compactState(snapshotValue, args));
+        if (args.view === 'full') return JSON.stringify(selectedState(snapshotValue));
+        if (args.task_id) return JSON.stringify(snapshotValue);
+        return JSON.stringify(compactState(snapshotValue));
       },
       execute(args) {
-        return controlPlane.snapshot(args.project_id);
+        if (args.view === 'full') return controlPlane.snapshot(args.project_id);
+        if (args.task_id) return controlPlane.getTaskDetail({ projectId: args.project_id, taskId: args.task_id });
+        return controlPlane.getProjectOverview(args.project_id);
       },
     }),
     projectTool({
@@ -205,7 +211,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         const project = projectFor(controlPlane, args.project_id);
         return controlPlane.answerInterview({
           actor: { type: 'pl', id: project.leadAgentId },
-          operationId: operationId('record-interview'),
+          responseView: 'overview', operationId: operationId('record-interview'),
           projectId: project.id,
           expectedVersion: project.version,
           answers: {
@@ -243,7 +249,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         const project = projectFor(controlPlane, args.project_id);
         return controlPlane.createTask({
           actor: { type: 'pl', id: project.leadAgentId },
-          operationId: operationId('create-task'),
+          responseView: 'overview', operationId: operationId('create-task'),
           projectId: project.id,
           expectedProjectVersion: project.version,
           title: args.title,
@@ -275,7 +281,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         if (!worker) throw new Error('No idle Worker Agent is available');
         return controlPlane.assignTask({
           actor: { type: 'pl', id: project.leadAgentId },
-          operationId: operationId('assign-task'),
+          responseView: 'overview', operationId: operationId('assign-task'),
           projectId: project.id,
           taskId: task.id,
           expectedVersion: task.version,
@@ -305,7 +311,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         }
         return coordinator.startTaskRun({
           actor: { type: 'pl', id: project.leadAgentId },
-          operationId: operationId('start-task-run'),
+          responseView: 'overview', operationId: operationId('start-task-run'),
           projectId: project.id,
           taskId: task.id,
           expectedVersion: task.version,
@@ -332,7 +338,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         const project = projectFor(controlPlane, args.project_id);
         return governance.respondRequest({
           actor: { type: 'pl', id: project.leadAgentId },
-          operationId: operationId('respond-request'),
+          responseView: 'overview', operationId: operationId('respond-request'),
           requestId: args.request_id,
           outcome: args.outcome,
           body: args.body,
@@ -361,7 +367,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         }
         return controlPlane.transitionTask({
           actor: { type: 'pl', id: project.leadAgentId },
-          operationId: operationId('cancel-task'),
+          responseView: 'overview', operationId: operationId('cancel-task'),
           projectId: project.id,
           taskId: task.id,
           expectedVersion: task.version,
@@ -383,7 +389,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         const project = projectFor(controlPlane, args.project_id);
         return governance.requestIndependentReview({
           actor: { type: 'pl', id: project.leadAgentId },
-          operationId: operationId('request-review'),
+          responseView: 'overview', operationId: operationId('request-review'),
           taskId: args.task_id,
           parentAgent: exec?.agent,
         });
@@ -407,7 +413,7 @@ export function createPLBridgeTools({ controlPlane, coordinator, governance, sto
         if (!result) throw new Error('Task has no submitted Result');
         return governance.submitReview({
           actor: { type: 'pl', id: project.leadAgentId },
-          operationId: operationId('review-task'),
+          responseView: 'overview', operationId: operationId('review-task'),
           taskId: task.id,
           decision: args.decision,
           issues: args.issues ?? [],

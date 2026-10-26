@@ -376,7 +376,7 @@ export class CollaborationGovernance {
       this.controlPlane.addTaskStateEvent({ taskId: task.id, fromStatus: task.status, toStatus: 'READY', actor, reason: `Request ${request.id} resolved as ${outcome}`, evidenceRefs, at });
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: 'REQUEST_RESOLVED', actor, objectRef: request.id, summary: `${outcome}; source Task returned to READY for a new one-shot Run`, at });
     });
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
   timeoutExpiredRequests(at = now()) {
@@ -470,7 +470,7 @@ export class CollaborationGovernance {
       if (decision === 'REJECT') this.returnForRework({ project, task, reviewId, actor, issues, evidenceRefs, at });
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: `REVIEW_${decision}`, actor, objectRef: reviewId, summary: `${reviewerRole} ${decision}${finalApprove ? (riskAccepted ? '; Task VERIFIED with Human-accepted unverified risk' : '; Task VERIFIED') : decision === 'REJECT' ? '; Task returned for rework' : '; awaiting PL'}`, at });
     });
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
   requestIndependentReview(input) {
@@ -520,7 +520,7 @@ export class CollaborationGovernance {
       .catch((error) => this.logger.error(`Review Run ${reviewRunId} failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}`))
       .finally(() => this.reviewJobs.delete(reviewRunId));
     this.reviewJobs.set(reviewRunId, job);
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
   async executeReviewRun({ reviewRunId, project, task, result, reviewer, runtime, parentAgent }) {
@@ -658,7 +658,7 @@ export class CollaborationGovernance {
     const task = input.taskId ? this.controlPlane.requireTask(project, input.taskId) : null;
     const operationId = this.controlPlane.assertNewOperation(input.operationId);
     this.createFindingInternal({ project, task, agent, description: input.description, evidenceRefs: requireStringArray(input.evidenceRefs ?? [], 'evidenceRefs', { max: 32 }), severity: enumValue(input.severity, 'severity', ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']), operationId });
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
   updateFinding(input) {
@@ -675,7 +675,7 @@ export class CollaborationGovernance {
       this.store.db.prepare('UPDATE findings SET status=?, linked_fix_task_id=?, updated_at=? WHERE id=?').run(status, linkedTaskId, at, row.id);
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: 'FINDING_TRIAGED', actor, objectRef: row.id, summary: `Finding moved to ${status}`, at });
     });
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
   maybeTriggerPlanCheck(projectId, trigger, at = now()) {
@@ -705,7 +705,7 @@ export class CollaborationGovernance {
       this.store.db.prepare("UPDATE plan_checks SET status='COMPLETED', decision=?, notes=?, actor_id=?, completed_at=? WHERE id=?").run(decision, notes, actorKey(actor), at, row.id);
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: 'PLAN_CHECK_COMPLETED', actor, objectRef: row.id, summary: `${decision}: ${notes}`, at });
     });
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
   recordDecision(input) {
@@ -727,6 +727,6 @@ export class CollaborationGovernance {
         VALUES(?, ?, ?, ?, 'APPROVED', ?, ?, ?)`).run(decisionId, project.id, requireString(input.title, 'title', { max: 300 }), requireString(input.body, 'body', { max: 10000 }), actorKey(actor), at, at);
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: 'DECISION_APPROVED', actor, objectRef: decisionId, summary: input.title, at });
     });
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 }

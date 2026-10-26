@@ -16,6 +16,11 @@ function fixture() {
       const cell = cells[slot];
       return [cell.value, (next) => { cell.value = typeof next === 'function' ? next(cell.value) : next; }];
     },
+    useRef(initial) {
+      const slot = index++;
+      if (!cells[slot]) cells[slot] = { value: { current: initial } };
+      return cells[slot].value;
+    },
     useEffect() {},
   };
   const source = readFileSync(resolve('client.js'), 'utf8').replace(
@@ -89,7 +94,7 @@ test('O2 Request drafts are per request, submit cleans only one, and project swi
   tree = fx.render(fx.GovernancePanel, b);
   assert.equal(byId(tree, 'request-response-body').props.value, '');
   assert.equal(byId(tree, 'respond-REQ-2').props.disabled, true);
-  assert.match(readFileSync(resolve('client.js'), 'utf8'), /h\(GovernancePanel, \{ key: selected\.project\.id/);
+  assert.match(readFileSync(resolve('client.js'), 'utf8'), /h\(GovernancePanel, \{\s*key: selected\.project\.id/);
 });
 
 test('O2 Review issues are per Task; Actor, Task and Project identifiers stay paired', async () => {
@@ -183,4 +188,46 @@ test('O2 large Task list paginates; latest Run opens inside Task details, histor
     actor: { type: 'pl', id: 'PL-A' }, projectId: 'A', taskId: 'TASK-0', expectedVersion: 1,
     verification_command_ids: ['VCMD-1'], writeIntent: true,
   } });
+});
+
+test('O3 TaskBoard loads full Run history only after a Task is expanded', async () => {
+  const fx = fixture();
+  const task = { id: 'TASK-1', title: 'On-demand', status: 'READY', assignedAgentId: null,
+    dependencies: [], version: 1, charterVersion: 1, scope: { allowed: ['src/**'], forbidden: [] } };
+  const a = selected('A', { tasks: [task], taskRuns: [{ id: 'RUN-2', taskId: task.id, attempt: 2, status: 'SUCCEEDED' }] });
+  const reads = [];
+  const loader = async (projectId, taskId) => {
+    reads.push([projectId, taskId]);
+    return { projectId, task, taskRuns: [
+      { id: 'RUN-1', taskId, attempt: 1, status: 'FAILED' },
+      { id: 'RUN-2', taskId, attempt: 2, status: 'SUCCEEDED' },
+    ], results: [], evidence: [] };
+  };
+  let tree = fx.render(fx.TaskBoard, a, { detailLoader: loader });
+  assert.equal(reads.length, 0);
+  assert.equal(byId(tree, 'task-run'), undefined);
+  byId(tree, 'task-details').props.onToggle({ currentTarget: { open: true } });
+  await Promise.resolve();
+  tree = fx.render(fx.TaskBoard, a, { detailLoader: loader });
+  assert.deepEqual(reads, [['A', 'TASK-1']]);
+  assert.equal(all(tree, (node) => node.props?.['data-testid'] === 'task-run').length, 2);
+});
+
+test('O3 GovernancePanel loads paged history only when explicitly expanded', async () => {
+  const fx = fixture();
+  const a = selected('A');
+  const reads = [];
+  const loader = async (projectId, kind, cursor) => {
+    reads.push([projectId, kind, cursor]);
+    return { projectId, kind, items: [{ id: `${kind}-1`, status: 'APPROVED' }], hasMore: false, nextCursor: null };
+  };
+  let tree = fx.render(fx.GovernancePanel, a, { historyLoader: loader });
+  assert.equal(reads.length, 0);
+  byId(tree, 'governance-history').props.onToggle({ currentTarget: { open: true } });
+  await Promise.resolve();
+  tree = fx.render(fx.GovernancePanel, a, { historyLoader: loader });
+  assert.deepEqual(reads.map(([projectId, kind]) => [projectId, kind]), [
+    ['A', 'approvals'], ['A', 'requests'], ['A', 'reviews'], ['A', 'findings'], ['A', 'plan-checks'],
+  ]);
+  assert.ok(byId(tree, 'history-approvals'));
 });

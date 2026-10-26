@@ -55,7 +55,7 @@ window.__ModuleLoader__.load({
     async function request(action, body = {}) {
       const response = await fetch(ROUTE, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action, operationId: op(), ...body }),
+        body: JSON.stringify({ action, operationId: op(), responseView: 'overview', ...body }),
       });
       const payload = await response.json();
       if (!response.ok || payload.ok !== true) {
@@ -67,7 +67,7 @@ window.__ModuleLoader__.load({
     }
 
     async function requestSnapshot(projectId = '') {
-      const response = await fetch(projectId ? `${ROUTE}?projectId=${encodeURIComponent(projectId)}` : ROUTE);
+      const response = await fetch(projectId ? `${ROUTE}?view=overview&projectId=${encodeURIComponent(projectId)}` : `${ROUTE}?view=overview`);
       const payload = await response.json();
       if (!response.ok || payload.ok !== true) throw new Error(payload.error?.message || `HTTP ${response.status}`);
       if (projectId && payload.data?.selected?.project?.id !== projectId) {
@@ -76,8 +76,27 @@ window.__ModuleLoader__.load({
       return payload.data;
     }
 
-    async function requestActivityPage({ projectId, limit = 50, cursor = null, actorId = '', eventType = '', taskId = '' }) {
+    async function requestTaskDetail(projectId, taskId) {
+      const response = await fetch(`${ROUTE}?view=task-detail&projectId=${encodeURIComponent(projectId)}&taskId=${encodeURIComponent(taskId)}`);
+      const payload = await response.json();
+      if (!response.ok || payload.ok !== true) throw new Error(payload.error?.message || `HTTP ${response.status}`);
+      if (payload.data?.projectId !== projectId || payload.data?.task?.id !== taskId) throw new Error('Host 返回的 Task 明细与当前 Project 不符');
+      return payload.data;
+    }
+
+    async function requestHistoryPage({ projectId, kind, limit = 50, cursor = null }) {
+      const query = new URLSearchParams({ view: 'history', projectId, kind, limit: String(limit) });
+      if (cursor?.createdAt && cursor?.id) { query.set('cursorCreatedAt', cursor.createdAt); query.set('cursorId', cursor.id); }
+      const response = await fetch(`${ROUTE}?${query.toString()}`);
+      const payload = await response.json();
+      if (!response.ok || payload.ok !== true) throw new Error(payload.error?.message || `HTTP ${response.status}`);
+      if (payload.data?.projectId !== projectId || payload.data?.kind !== kind) throw new Error('Host 返回的历史页与当前 Project 不符');
+      return payload.data;
+    }
+
+    async function requestActivityPage({ projectId, limit = 50, cursor = null, actorId = '', eventType = '', taskId = '', includeFacets = true }) {
       const query = new URLSearchParams({ view: 'activity', projectId, limit: String(limit) });
+      if (!includeFacets) query.set('includeFacets', 'false');
       if (cursor?.createdAt && cursor?.id) {
         query.set('cursorCreatedAt', cursor.createdAt);
         query.set('cursorId', cursor.id);
@@ -189,7 +208,8 @@ window.__ModuleLoader__.load({
               disabled: busy || runtime.availability !== 'AVAILABLE',
               'data-testid': `authorize-${runtime.providerKey.replace(/[^a-z0-9]/gi, '-')}`,
               onClick: () => act('authorize-runtime', {
-                actor: { type: 'human', id: ownerId }, providerKey: runtime.providerKey, authorized: !runtime.authorized,
+                actor: { type: 'human', id: ownerId }, projectId: data.selected?.project?.id,
+                providerKey: runtime.providerKey, authorized: !runtime.authorized,
               }),
             }, runtime.authorized ? '撤销授权' : '授权')),
           h('details', { style: { marginTop: 7 } },
@@ -202,7 +222,7 @@ window.__ModuleLoader__.load({
       return h('div', { style: styles.section, 'data-testid': 'runtime-catalog' },
         h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
           h('strong', null, '模型与 Worker 运行方式'),
-          h(Button, { disabled: busy, 'data-testid': 'rescan-runtimes', onClick: () => act('rescan-runtimes', { actor: { type: 'human', id: ownerId } }) }, '重新扫描')),
+          h(Button, { disabled: busy, 'data-testid': 'rescan-runtimes', onClick: () => act('rescan-runtimes', { actor: { type: 'human', id: ownerId }, projectId: data.selected?.project?.id }) }, '重新扫描')),
         h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' } },
           'PL 使用 Harness 报告的模型服务；fork / spawn 是 Worker 的启动方式，不是大模型名称。'),
         h('div', { style: styles.section }, h('b', null, `PL 对话模型来源 · ${plRuntimes.length}`), plRuntimes.map(runtimeCard)),
@@ -390,7 +410,7 @@ window.__ModuleLoader__.load({
           replacedAgents.length > 5 && h('div', { style: { ...styles.muted, marginTop: 8 } }, `仅显示最近 5 条；其余 ${replacedAgents.length - 5} 条仍保存在 Host 审计库中。`)));
     }
 
-    function TaskBoard({ selected, busy, act, readOnly = false }) {
+    function TaskBoard({ selected, busy, act, detailLoader, readOnly = false }) {
       const tasks = selected.tasks || [];
       const proposals = selected.taskProposals || [];
       const runs = selected.taskRuns || [];
@@ -401,6 +421,8 @@ window.__ModuleLoader__.load({
       const approvedCommandIds = new Set(approvedCommands.map((command) => command.id));
       const [filter, setFilter] = React.useState(readOnly ? 'all' : 'active');
       const [page, setPage] = React.useState(0);
+      const [detailsByTask, setDetailsByTask] = React.useState({});
+      const [detailErrors, setDetailErrors] = React.useState({});
       React.useEffect(() => { if (readOnly) { setFilter('all'); setPage(0); } }, [readOnly]);
       const pageSize = 30;
       const runsByTask = new Map();
@@ -413,6 +435,16 @@ window.__ModuleLoader__.load({
       for (const item of evidence) {
         if (!evidenceByResult.has(item.resultId)) evidenceByResult.set(item.resultId, []);
         evidenceByResult.get(item.resultId).push(item);
+      }
+      for (const detail of Object.values(detailsByTask)) {
+        const currentTask = tasks.find((task) => task.id === detail.task?.id);
+        if (!currentTask || currentTask.version !== detail.task.version) continue;
+        runsByTask.set(detail.task.id, detail.taskRuns || []);
+        for (const result of detail.results || []) resultByRun.set(result.runId, result);
+        for (const item of detail.evidence || []) {
+          if (!evidenceByResult.has(item.resultId)) evidenceByResult.set(item.resultId, []);
+          if (!evidenceByResult.get(item.resultId).some((existing) => existing.id === item.id)) evidenceByResult.get(item.resultId).push(item);
+        }
       }
       const taskMatches = (task) => filter === 'all'
         || (filter === 'active' && ['PENDING', 'READY', 'RUNNING'].includes(task.status))
@@ -428,6 +460,25 @@ window.__ModuleLoader__.load({
       const [commandByTask, setCommandByTask] = React.useState({});
       const [assigneeByTask, setAssigneeByTask] = React.useState({});
       const [expandedTasks, setExpandedTasks] = React.useState({});
+      const taskVersionsRef = React.useRef(new Map());
+      taskVersionsRef.current = new Map(tasks.map((task) => [task.id, task.version]));
+      const loadTaskDetail = async (taskId) => {
+        if (!detailLoader) return;
+        try {
+          const detail = await detailLoader(selected.project.id, taskId);
+          if (taskVersionsRef.current.get(taskId) !== detail.task.version) return;
+          setDetailsByTask((items) => ({ ...items, [taskId]: detail }));
+          setDetailErrors((items) => { const next = { ...items }; delete next[taskId]; return next; });
+        } catch (error) {
+          setDetailErrors((items) => ({ ...items, [taskId]: error.message }));
+        }
+      };
+      React.useEffect(() => {
+        if (!detailLoader) return;
+        for (const task of tasks) {
+          if (expandedTasks[task.id] && detailsByTask[task.id]?.task?.version !== task.version) loadTaskDetail(task.id);
+        }
+      }, [selected.project.id, tasks.map((task) => `${task.id}:${task.version}`).join('|')]);
       const [form, setForm] = React.useState({
         title: '', goal: '', allowed: '', forbidden: '', acceptance: '', dependencies: '',
         controlLevel: 'IMPORTANT', reviewPolicy: 'PL',
@@ -595,9 +646,16 @@ window.__ModuleLoader__.load({
               },
             }, '启动一次性 Worker Run')),
           h('details', { style: { marginTop: 8 }, 'data-testid': 'task-details',
-            onToggle: (event) => setExpandedTasks((items) => ({ ...items, [task.id]: event.currentTarget.open })) },
+            onToggle: (event) => {
+              const open = event.currentTarget.open;
+              setExpandedTasks((items) => ({ ...items, [task.id]: open }));
+              if (open && detailLoader && (!detailsByTask[task.id] || detailsByTask[task.id].task.version !== task.version)) loadTaskDetail(task.id);
+            } },
             h('summary', { style: { cursor: 'pointer' } }, `详情与运行历史 · ${(runsByTask.get(task.id) || []).length} 次`),
             expandedTasks[task.id] && h('div', null,
+              detailLoader && !detailsByTask[task.id] && !detailErrors[task.id] && h('div', { style: styles.muted }, '正在读取该 Task 的完整历史…'),
+              detailErrors[task.id] && h('div', { role: 'alert', style: styles.card }, `读取 Task 历史失败：${detailErrors[task.id]}`,
+                h(Button, { onClick: () => loadTaskDetail(task.id) }, '重试')),
               h('div', { style: styles.muted }, `${task.id} · v${task.version} · Charter v${task.charterVersion}`),
               h('div', null, `${task.controlLevel} / ${task.reviewPolicy} · assignee ${task.assignedAgentId || 'none'}`),
               h('div', { style: styles.muted }, `Dependencies: ${(task.dependencies || []).join(', ') || 'none'}`),
@@ -616,7 +674,7 @@ window.__ModuleLoader__.load({
             h('div', null, proposal.payload.goal)))));
     }
 
-    function GovernancePanel({ selected, ownerId, busy, act, readOnly = false }) {
+    function GovernancePanel({ selected, ownerId, busy, act, historyLoader, readOnly = false }) {
       const requests = selected.requests || [];
       const responses = selected.responses || [];
       const reviews = selected.reviews || [];
@@ -628,6 +686,29 @@ window.__ModuleLoader__.load({
       const [reviewIssues, setReviewIssues] = React.useState({});
       const [planNotes, setPlanNotes] = React.useState({});
       const [historyOpen, setHistoryOpen] = React.useState(false);
+      const [historyPages, setHistoryPages] = React.useState({});
+      const [historyLoading, setHistoryLoading] = React.useState({});
+      const [historyErrors, setHistoryErrors] = React.useState({});
+      const historyKinds = [['approvals', '审批'], ['requests', '协作请求'], ['reviews', '审核'], ['findings', '问题'], ['plan-checks', '计划检查']];
+      const loadHistory = async (kind, cursor = null) => {
+        if (!historyLoader) return;
+        setHistoryLoading((items) => ({ ...items, [kind]: true }));
+        try {
+          const page = await historyLoader(selected.project.id, kind, cursor);
+          setHistoryPages((items) => ({ ...items, [kind]: cursor
+            ? { ...page, items: [...(items[kind]?.items || []), ...page.items.filter((item) => !(items[kind]?.items || []).some((old) => old.id === item.id))] }
+            : page }));
+          setHistoryErrors((items) => { const next = { ...items }; delete next[kind]; return next; });
+        } catch (error) {
+          setHistoryErrors((items) => ({ ...items, [kind]: error.message }));
+        } finally {
+          setHistoryLoading((items) => ({ ...items, [kind]: false }));
+        }
+      };
+      React.useEffect(() => {
+        if (!historyOpen || !historyLoader || Object.keys(historyPages).length === 0) return;
+        for (const [kind] of historyKinds) loadHistory(kind);
+      }, [selected.project.id, selected.project.version]);
       const lead = selected.project.leadAgentId;
       const reviewer = selected.agents.find((agent) => agent.role === 'REVIEWER' && !['REPLACED', 'UNAVAILABLE'].includes(agent.status));
       const evidenceFor = (task) => (selected.results.find((item) => item.id === task.resultId)?.evidenceRefs || []).slice(0, 4);
@@ -737,9 +818,22 @@ window.__ModuleLoader__.load({
                 const ok = await act('complete-plan-check', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, planCheckId: plan.id, decision: 'KEEP_PLAN', notes: planNotes[plan.id] || 'Current evidence and dependencies remain aligned with the approved Charter.' });
                 if (ok) setPlanNotes((drafts) => { const next = { ...drafts }; delete next[plan.id]; return next; });
               } }, 'KEEP PLAN'))))),
-        h('details', { style: styles.section, 'data-testid': 'governance-history', onToggle: (event) => setHistoryOpen(event.currentTarget.open) },
+        h('details', { style: styles.section, 'data-testid': 'governance-history', onToggle: (event) => {
+          setHistoryOpen(event.currentTarget.open);
+          if (event.currentTarget.open && historyLoader) for (const [kind] of historyKinds) if (!historyPages[kind]) loadHistory(kind);
+        } },
           h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '历史审批、协作请求、审核与问题'),
-          historyOpen && h('div', null,
+          historyOpen && historyLoader && h('div', null, historyKinds.map(([kind, label]) => {
+            const page = historyPages[kind];
+            return h('div', { key: kind, style: styles.card, 'data-testid': `history-${kind}` },
+              h('b', null, `${label} · ${page?.items?.length || 0}${page?.hasMore ? '+' : ''}`),
+              historyLoading[kind] && h('div', { style: styles.muted }, '正在读取…'),
+              historyErrors[kind] && h('div', { role: 'alert' }, historyErrors[kind], h(Button, { onClick: () => loadHistory(kind) }, '重试')),
+              (page?.items || []).map((item) => h('div', { key: item.id, style: styles.card },
+                `${item.id} · ${item.status || item.decision || item.kind || ''} · ${item.description || item.body || item.response?.body || ''}`)),
+              page?.hasMore && h(Button, { disabled: historyLoading[kind], onClick: () => loadHistory(kind, page.nextCursor) }, '加载更多'));
+          })),
+          historyOpen && !historyLoader && h('div', null,
             h('div', { 'data-testid': 'approval-history' }, (selected.approvals || []).filter((item) => item.status !== 'PENDING').map((item) => h('div', { key: item.id, style: styles.card }, `${item.kind} · ${item.status} · ${item.id}`))),
             requests.filter((item) => !['PENDING', 'IN_PROGRESS'].includes(item.status)).map((item) => h('div', { key: item.id, style: styles.card }, `Request ${item.id} · ${item.status} · ${responses.find((response) => response.requestId === item.id)?.body || item.body}`)),
             reviews.map((item) => h('div', { key: item.id, style: styles.card }, `Review ${item.id} · ${item.decision} · ${item.taskId}`)),
@@ -819,13 +913,13 @@ window.__ModuleLoader__.load({
         const sequence = ++requestSequence.current;
         setLoading(true); setError('');
         try {
-          const page = await requestActivityPage({ projectId, limit: 50, cursor, ...filters });
+          const page = await requestActivityPage({ projectId, limit: 50, cursor, ...filters, includeFacets: false });
           if (sequence !== requestSequence.current) return;
           setItems((current) => {
             const seen = new Set(current.map((item) => item.id));
             return current.concat(page.items.filter((item) => !seen.has(item.id)));
           });
-          setCursor(page.nextCursor); setHasMore(page.hasMore); setFacets(page.facets);
+          setCursor(page.nextCursor); setHasMore(page.hasMore);
         } catch (e) { if (sequence === requestSequence.current) setError(`${e.code ? `${e.code}: ` : ''}${e.message}`); }
         finally { if (sequence === requestSequence.current) setLoading(false); }
       };
@@ -1189,14 +1283,18 @@ window.__ModuleLoader__.load({
       else if (activeView === 'tasks') view = h('section', { 'aria-labelledby': 'tasks-heading', 'data-testid': 'view-tasks' },
         h('strong', { id: 'tasks-heading', style: { fontSize: 16 } }, 'Tasks'),
         selected && !createMode && ['ACTIVE', 'STOPPED', 'COMPLETED'].includes(selected.project.status)
-          ? h(TaskBoard, { key: selected.project.id, selected, busy, act, readOnly: selected.project.status !== 'ACTIVE' })
+          ? h(TaskBoard, { key: selected.project.id, selected, busy, act, detailLoader: requestTaskDetail, readOnly: selected.project.status !== 'ACTIVE' })
           : h('div', { style: styles.card }, 'Task DAG 在 Project ACTIVE 后启用。'));
       else if (activeView === 'approvals') view = h('section', { 'aria-labelledby': 'approvals-heading', 'data-testid': 'view-approvals' },
         h('strong', { id: 'approvals-heading', style: { fontSize: 16 } }, 'Approvals & Governance'),
         selected && !createMode && selected.project.status === 'CHARTER_INTERVIEW' && h(Interview, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'CHARTER_PENDING_APPROVAL' && h(CharterApproval, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'TEAM_PENDING_APPROVAL' && h(TeamApproval, { selected, runtimes: data.runtimes, ownerId, busy, act }),
-        selected && !createMode && ['ACTIVE', 'COMPLETED', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, { key: selected.project.id, selected, ownerId, busy, act, readOnly: selected.project.status !== 'ACTIVE' }),
+        selected && !createMode && ['ACTIVE', 'COMPLETED', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, {
+          key: selected.project.id, selected, ownerId, busy, act,
+          historyLoader: (projectId, kind, cursor) => requestHistoryPage({ projectId, kind, cursor }),
+          readOnly: selected.project.status !== 'ACTIVE',
+        }),
         (!selected || createMode) && h('div', { style: styles.card }, '创建并选择 Project 后显示审批队列。'));
       else view = h(ActivityView, { selected });
 

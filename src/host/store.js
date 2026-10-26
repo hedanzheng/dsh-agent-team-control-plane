@@ -194,6 +194,16 @@ function mapTaskRun(row) {
   };
 }
 
+function mapTaskRunSummary(row) {
+  return {
+    id: row.id, taskId: row.task_id, agentId: row.agent_id, providerKey: row.provider_key,
+    attempt: row.attempt, status: row.status, terminalKind: row.terminal_kind,
+    watchdogState: row.watchdog_state,
+    error: row.error_code ? { code: row.error_code, message: row.error_message } : null,
+    startedAt: row.started_at, endedAt: row.ended_at, createdAt: row.created_at,
+  };
+}
+
 function mapResult(row) {
   if (!row) return undefined;
   return {
@@ -993,8 +1003,14 @@ export class ControlPlaneStore {
   }
 
   listTasks(projectId) {
-    return this.db.prepare('SELECT * FROM tasks WHERE project_id=? ORDER BY created_at, id').all(projectId)
-      .map((row) => mapTask(row, this.taskDependencies(row.id)));
+    const rows = this.db.prepare('SELECT * FROM tasks WHERE project_id=? ORDER BY created_at, id').all(projectId);
+    const dependencies = new Map();
+    for (const row of this.db.prepare(`SELECT d.task_id, d.dependency_task_id FROM task_dependencies d
+      JOIN tasks t ON t.id=d.task_id WHERE t.project_id=? ORDER BY d.task_id, d.dependency_task_id`).all(projectId)) {
+      if (!dependencies.has(row.task_id)) dependencies.set(row.task_id, []);
+      dependencies.get(row.task_id).push(row.dependency_task_id);
+    }
+    return rows.map((row) => mapTask(row, dependencies.get(row.id) || []));
   }
 
   getTaskProposal(proposalId) {
@@ -1112,6 +1128,140 @@ export class ControlPlaneStore {
       ? this.db.prepare('SELECT * FROM decisions WHERE project_id=? AND status=? ORDER BY created_at, id').all(projectId, status)
       : this.db.prepare('SELECT * FROM decisions WHERE project_id=? ORDER BY created_at, id').all(projectId);
     return rows.map(mapDecision);
+  }
+
+  systemSummary() {
+    return {
+      skillDiscovery: this.getSystemState('skill_discovery', { complete: false, grillMeAvailable: false, skills: [] }),
+      runtimeScan: this.getSystemState('runtime_scan', null),
+      runtimeAdapters: this.getSystemState('runtime_adapters', []),
+      taskRunRecovery: this.getSystemState('task_run_recovery', { recoveredRuns: 0 }),
+      requestRunRecovery: this.getSystemState('request_run_recovery', { recoveredRequestRuns: 0 }),
+      reviewRunRecovery: this.getSystemState('review_run_recovery', { recoveredReviewRuns: 0 }),
+    };
+  }
+
+  // O3: regular Panel/PL reads are bounded by the current Project's Task count,
+  // not by its accumulated Run, Result, Evidence or Verification history.
+  getProjectOverview(projectId = undefined) {
+    const projects = this.listProjects();
+    const project = projectId ? this.getProject(projectId) : projects.at(-1);
+    const base = { schemaVersion: SCHEMA_VERSION, view: 'overview', projects,
+      runtimes: this.listRuntimes(), system: this.systemSummary() };
+    if (!project) return { ...base, selected: null };
+    const id = project.id;
+    const tasks = this.listTasks(id);
+    const taskRuns = this.db.prepare(`SELECT r.id,r.task_id,r.agent_id,r.provider_key,r.attempt,r.status,
+      r.terminal_kind,r.watchdog_state,r.error_code,r.error_message,r.started_at,r.ended_at,r.created_at
+      FROM tasks t JOIN task_runs r ON r.id=(
+      SELECT x.id FROM task_runs x WHERE x.task_id=t.id ORDER BY x.attempt DESC LIMIT 1)
+      WHERE t.project_id=? ORDER BY t.created_at, t.id`).all(id).map(mapTaskRunSummary);
+    const results = this.db.prepare(`SELECT r.* FROM tasks t JOIN results r ON r.id=t.result_id AND r.task_id=t.id
+      WHERE t.project_id=? ORDER BY t.created_at, t.id`).all(id).map(mapResult);
+    const evidence = this.db.prepare(`SELECT e.* FROM tasks t JOIN results r ON r.id=t.result_id AND r.task_id=t.id
+      JOIN evidence e ON e.result_id=r.id WHERE t.project_id=? AND t.status='SUBMITTED'
+      ORDER BY e.created_at, e.id`).all(id).map(mapEvidence);
+    const reviews = this.db.prepare(`SELECT v.* FROM tasks t JOIN reviews v ON v.task_id=t.id AND v.result_id=t.result_id
+      WHERE t.project_id=? AND t.status='SUBMITTED' ORDER BY v.created_at, v.id`).all(id).map(mapReview);
+    const reviewRuns = this.db.prepare(`SELECT x.* FROM tasks t JOIN review_runs x ON x.task_id=t.id AND x.result_id=t.result_id
+      WHERE t.project_id=? AND t.status='SUBMITTED' ORDER BY x.created_at, x.id`).all(id).map(mapReviewRun);
+    const requests = this.db.prepare(`SELECT * FROM requests WHERE project_id=? AND status IN ('PENDING','IN_PROGRESS')
+      ORDER BY created_at, id`).all(id).map(mapRequest);
+    const requestRuns = this.db.prepare(`SELECT x.* FROM requests q JOIN request_runs x ON x.request_id=q.id
+      WHERE q.project_id=? AND q.status IN ('PENDING','IN_PROGRESS') AND x.status IN ('STARTING','RUNNING')
+      ORDER BY x.created_at, x.id`).all(id).map(mapRequestRun);
+    const findings = this.db.prepare("SELECT * FROM findings WHERE project_id=? AND status<>'CLOSED' ORDER BY created_at,id")
+      .all(id).map(mapFinding);
+    const planChecks = this.db.prepare("SELECT * FROM plan_checks WHERE project_id=? AND status='PENDING' ORDER BY created_at,id")
+      .all(id).map(mapPlanCheck);
+    const taskProposals = this.db.prepare("SELECT * FROM task_proposals WHERE project_id=? AND status='PENDING' ORDER BY created_at,id")
+      .all(id).map(mapTaskProposal);
+    const approvals = this.db.prepare("SELECT * FROM approvals WHERE project_id=? AND status='PENDING' ORDER BY created_at,id")
+      .all(id).map(mapApproval);
+    const verificationCommands = this.db.prepare("SELECT * FROM verification_commands WHERE project_id=? AND status='APPROVED' ORDER BY created_at,id")
+      .all(id).map(mapVerificationCommand);
+    return { ...base, selected: {
+      project, interview: this.getInterview(id), charters: this.listCharters(id), agents: this.listAgents(id), approvals,
+      activities: this.listRecentActivities(id, 10), tasks, taskProposals, taskStateEvents: [], taskRuns,
+      taskRunEvents: [], results, evidence, verificationRuns: [], requests, responses: [], requestRuns,
+      reviews, reviewRuns, findings, planChecks, decisions: this.listDecisions(id), verificationCommands,
+      stats: { totalTasks: tasks.length, activeRuns: taskRuns.filter((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status)).length },
+    } };
+  }
+
+  getTaskDetail(projectId, taskId) {
+    const task = this.getTask(taskId);
+    if (!task || task.projectId !== projectId) return undefined;
+    const taskRuns = this.db.prepare('SELECT * FROM task_runs WHERE task_id=? ORDER BY attempt,id').all(taskId).map(mapTaskRun);
+    const results = this.db.prepare('SELECT * FROM results WHERE task_id=? ORDER BY created_at,id').all(taskId).map(mapResult);
+    const evidence = this.db.prepare(`SELECT e.* FROM evidence e JOIN results r ON r.id=e.result_id
+      WHERE r.task_id=? ORDER BY e.created_at,e.id`).all(taskId).map(mapEvidence);
+    const verificationRuns = this.db.prepare(`SELECT v.* FROM verification_runs v JOIN results r ON r.id=v.result_id
+      WHERE r.task_id=? ORDER BY v.started_at,v.id`).all(taskId).map((row) => ({
+      id: row.id, resultId: row.result_id, command: row.command_text, cwd: row.cwd,
+      exitCode: row.exit_code, status: row.status, stdoutExcerpt: row.stdout_excerpt,
+      stderrExcerpt: row.stderr_excerpt, startedAt: row.started_at, endedAt: row.ended_at,
+    }));
+    const requests = this.db.prepare('SELECT * FROM requests WHERE source_task_id=? ORDER BY created_at,id').all(taskId).map(mapRequest);
+    const responses = this.db.prepare(`SELECT s.* FROM responses s JOIN requests q ON q.id=s.request_id
+      WHERE q.source_task_id=? ORDER BY s.created_at,s.id`).all(taskId).map(mapResponse);
+    const reviews = this.db.prepare('SELECT * FROM reviews WHERE task_id=? ORDER BY created_at,id').all(taskId).map(mapReview);
+    const reviewRuns = this.db.prepare('SELECT * FROM review_runs WHERE task_id=? ORDER BY created_at,id').all(taskId).map(mapReviewRun);
+    return { projectId, task, taskRuns, results, evidence, verificationRuns, requests, responses, reviews, reviewRuns };
+  }
+
+  getProjectHistoryPage(projectId, kind, cursor = null, limit = 50) {
+    const bounded = Math.max(1, Math.min(100, Number(limit) || 50));
+    const definition = {
+      'task-runs': { alias: 'r', from: 'task_runs r JOIN tasks t ON t.id=r.task_id', projectColumn: 't.project_id', map: mapTaskRun },
+      reviews: { alias: 'v', from: 'reviews v JOIN tasks t ON t.id=v.task_id', projectColumn: 't.project_id', map: mapReview },
+      evidence: { alias: 'e', from: 'evidence e JOIN results r ON r.id=e.result_id JOIN tasks t ON t.id=r.task_id', projectColumn: 't.project_id', map: mapEvidence },
+      approvals: { alias: 'a', from: 'approvals a', projectColumn: 'a.project_id', map: mapApproval },
+      requests: { alias: 'q', from: 'requests q LEFT JOIN responses s ON s.request_id=q.id', projectColumn: 'q.project_id',
+        select: 'q.*,s.outcome AS response_outcome,s.body AS response_body',
+        map: (row) => ({ ...mapRequest(row), response: row.response_outcome ? { outcome: row.response_outcome, body: row.response_body } : null }) },
+      findings: { alias: 'f', from: 'findings f', projectColumn: 'f.project_id', map: mapFinding },
+      'plan-checks': { alias: 'p', from: 'plan_checks p', projectColumn: 'p.project_id', map: mapPlanCheck },
+    }[kind];
+    if (!definition) return undefined;
+    const { alias, from, projectColumn, map } = definition;
+    const argumentsList = [projectId];
+    let after = '';
+    if (cursor?.createdAt && cursor?.id) {
+      after = ` AND (${alias}.created_at < ? OR (${alias}.created_at = ? AND ${alias}.id < ?))`;
+      argumentsList.push(cursor.createdAt, cursor.createdAt, cursor.id);
+    }
+    const rows = this.db.prepare(`SELECT ${definition.select || `${alias}.*`} FROM ${from} WHERE ${projectColumn}=?${after}
+      ORDER BY ${alias}.created_at DESC, ${alias}.id DESC LIMIT ?`).all(...argumentsList, bounded + 1);
+    const hasMore = rows.length > bounded;
+    const items = rows.slice(0, bounded).map(map);
+    const last = items.at(-1);
+    return { items, hasMore, nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null };
+  }
+
+  latestResultsForTasks(taskIds) {
+    const ids = [...new Set(taskIds)];
+    if (!ids.length) return new Map();
+    const placeholders = ids.map(() => '?').join(',');
+    const rows = this.db.prepare(`SELECT r.* FROM results r WHERE r.task_id IN (${placeholders})
+      AND r.id=(SELECT x.id FROM results x WHERE x.task_id=r.task_id ORDER BY x.created_at DESC,x.id DESC LIMIT 1)`)
+      .all(...ids);
+    return new Map(rows.map((row) => [row.task_id, mapResult(row)]));
+  }
+
+  latestResolvedRequestForTask(taskId) {
+    return mapRequest(this.db.prepare(`SELECT * FROM requests WHERE source_task_id=? AND response_id IS NOT NULL
+      ORDER BY created_at DESC,id DESC LIMIT 1`).get(taskId));
+  }
+
+  recentReviewsForTask(taskId, limit = 5) {
+    return this.db.prepare('SELECT * FROM reviews WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT ?')
+      .all(taskId, limit).map(mapReview).reverse();
+  }
+
+  recentApprovedDecisions(projectId, limit = 12) {
+    return this.db.prepare("SELECT * FROM decisions WHERE project_id=? AND status='APPROVED' ORDER BY created_at DESC,id DESC LIMIT ?")
+      .all(projectId, limit).map(mapDecision).reverse();
   }
 
   snapshot(projectId = undefined) {

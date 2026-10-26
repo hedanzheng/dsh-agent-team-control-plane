@@ -187,10 +187,20 @@ test('project state defaults to a compact summary and supports focused Task deta
   });
   const fx = fixture();
   // Replace the fixture snapshot return while preserving its authorization setup.
+  const readCalls = [];
   const stateTool = named(createPLBridgeTools({
     controlPlane: {
       requireProject: () => fx.project,
-      snapshot: () => state,
+      snapshot: () => { readCalls.push('full'); return state; },
+      getProjectOverview: () => { readCalls.push('overview'); return state; },
+      getTaskDetail: ({ projectId, taskId }) => {
+        readCalls.push('task-detail');
+        assert.equal(projectId, project.id);
+        assert.equal(taskId, 'TASK-1');
+        return { project: state.selected.project, charter: null, task: state.selected.tasks[0],
+          taskRuns: state.selected.taskRuns, results: [], evidence: [], requests: state.selected.requests,
+          responses: [], reviews: [], reviewRuns: [], verificationCommands: state.selected.verificationCommands };
+      },
     },
     coordinator: {}, governance: {},
     store: { listAgents: () => [{ id: project.leadAgentId, role: 'PROJECT_LEAD', status: 'IDLE' }] },
@@ -203,6 +213,9 @@ test('project state defaults to a compact summary and supports focused Task deta
   const detail = JSON.parse(await stateTool.execute({ project_id: project.id, task_id: 'TASK-1' }, { agent: fx.parentAgent }));
   assert.equal(detail.task.id, 'TASK-1');
   assert.equal(detail.taskRuns.length, 1);
+  assert.deepEqual(readCalls, ['overview', 'task-detail']);
+  await stateTool.execute({ project_id: project.id, view: 'full' }, { agent: fx.parentAgent });
+  assert.deepEqual(readCalls, ['overview', 'task-detail', 'full']);
 });
 
 test('PL can answer an addressed Worker Request and cancel a superseded Task', async () => {

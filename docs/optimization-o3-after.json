@@ -1,0 +1,365 @@
+{
+  "kind": "O0 synthetic baseline",
+  "measuredAt": "2026-10-26T09:28:46.859Z",
+  "node": "v24.15.0",
+  "platform": "win32/x64",
+  "gcExposed": true,
+  "database": [
+    {
+      "scale": "S",
+      "records": {
+        "name": "S",
+        "tasks": 10,
+        "runs": 20,
+        "activities": 200,
+        "results": 20,
+        "evidence": 20,
+        "verificationRuns": 20,
+        "reviews": 5,
+        "requests": 2,
+        "responses": 2,
+        "dependencies": 9
+      },
+      "sqliteAndWalBytes": 1186568,
+      "snapshot": {
+        "medianMs": 1.527,
+        "sqlCalls": 32,
+        "medianJsonBytes": 46518,
+        "medianRssBytes": 58507264,
+        "rangeMs": [
+          1.436,
+          1.588
+        ]
+      },
+      "overview": {
+        "medianMs": 1.015,
+        "sqlCalls": 28,
+        "medianJsonBytes": 17205,
+        "medianRssBytes": 58400768,
+        "rangeMs": [
+          0.937,
+          1.22
+        ]
+      },
+      "httpOverview": {
+        "medianMs": 1.081,
+        "sqlCalls": 28,
+        "medianJsonBytes": 17224,
+        "medianRssBytes": 58556416,
+        "rangeMs": [
+          0.96,
+          1.346
+        ]
+      },
+      "plDefault": {
+        "medianMs": 1.057,
+        "sqlCalls": 30,
+        "medianJsonBytes": 7516,
+        "medianRssBytes": 58564608,
+        "rangeMs": [
+          1.015,
+          1.251
+        ]
+      },
+      "taskList": {
+        "medianMs": 0.168,
+        "sqlCalls": 2,
+        "medianJsonBytes": 4376,
+        "medianRssBytes": 58302464,
+        "rangeMs": [
+          0.167,
+          0.238
+        ]
+      },
+      "taskDetail": {
+        "medianMs": 0.415,
+        "sqlCalls": 10,
+        "medianJsonBytes": 4376,
+        "medianRssBytes": 58474496,
+        "rangeMs": [
+          0.405,
+          0.492
+        ]
+      },
+      "historyFirstPage": {
+        "medianMs": 0.346,
+        "sqlCalls": 1,
+        "medianJsonBytes": 13635,
+        "medianRssBytes": 58560512,
+        "rangeMs": [
+          0.311,
+          0.382
+        ]
+      },
+      "activityFirstPage": {
+        "medianMs": 0.243,
+        "sqlCalls": 1,
+        "medianJsonBytes": 12282,
+        "medianRssBytes": 58630144,
+        "rangeMs": [
+          0.197,
+          0.321
+        ]
+      },
+      "activityFacets": {
+        "medianMs": 0.134,
+        "sqlCalls": 2,
+        "medianJsonBytes": 176,
+        "medianRssBytes": 58662912,
+        "rangeMs": [
+          0.111,
+          0.215
+        ]
+      }
+    },
+    {
+      "scale": "M",
+      "records": {
+        "name": "M",
+        "tasks": 100,
+        "runs": 300,
+        "activities": 5000,
+        "results": 300,
+        "evidence": 300,
+        "verificationRuns": 300,
+        "reviews": 75,
+        "requests": 20,
+        "responses": 20,
+        "dependencies": 99
+      },
+      "sqliteAndWalBytes": 8941080,
+      "snapshot": {
+        "medianMs": 7.925,
+        "sqlCalls": 32,
+        "medianJsonBytes": 588467,
+        "medianRssBytes": 66457600,
+        "rangeMs": [
+          7.721,
+          9.48
+        ]
+      },
+      "overview": {
+        "medianMs": 2.346,
+        "sqlCalls": 28,
+        "medianJsonBytes": 123214,
+        "medianRssBytes": 67567616,
+        "rangeMs": [
+          2.273,
+          3.136
+        ]
+      },
+      "httpOverview": {
+        "medianMs": 2.381,
+        "sqlCalls": 28,
+        "medianJsonBytes": 123233,
+        "medianRssBytes": 67629056,
+        "rangeMs": [
+          2.318,
+          2.511
+        ]
+      },
+      "plDefault": {
+        "medianMs": 2.71,
+        "sqlCalls": 30,
+        "medianJsonBytes": 52381,
+        "medianRssBytes": 67649536,
+        "rangeMs": [
+          2.264,
+          3.036
+        ]
+      },
+      "taskList": {
+        "medianMs": 0.653,
+        "sqlCalls": 2,
+        "medianJsonBytes": 43896,
+        "medianRssBytes": 67661824,
+        "rangeMs": [
+          0.639,
+          1.036
+        ]
+      },
+      "taskDetail": {
+        "medianMs": 0.653,
+        "sqlCalls": 10,
+        "medianJsonBytes": 6326,
+        "medianRssBytes": 67661824,
+        "rangeMs": [
+          0.579,
+          0.722
+        ]
+      },
+      "historyFirstPage": {
+        "medianMs": 0.811,
+        "sqlCalls": 1,
+        "medianJsonBytes": 34195,
+        "medianRssBytes": 67747840,
+        "rangeMs": [
+          0.765,
+          0.867
+        ]
+      },
+      "activityFirstPage": {
+        "medianMs": 0.22,
+        "sqlCalls": 1,
+        "medianJsonBytes": 12533,
+        "medianRssBytes": 67747840,
+        "rangeMs": [
+          0.183,
+          0.566
+        ]
+      },
+      "activityFacets": {
+        "medianMs": 0.778,
+        "sqlCalls": 2,
+        "medianJsonBytes": 181,
+        "medianRssBytes": 67751936,
+        "rangeMs": [
+          0.709,
+          1.224
+        ]
+      }
+    },
+    {
+      "scale": "L",
+      "records": {
+        "name": "L",
+        "tasks": 500,
+        "runs": 2000,
+        "activities": 20000,
+        "results": 2000,
+        "evidence": 2000,
+        "verificationRuns": 2000,
+        "reviews": 500,
+        "requests": 100,
+        "responses": 100,
+        "dependencies": 499
+      },
+      "sqliteAndWalBytes": 34648944,
+      "snapshot": {
+        "medianMs": 52.5,
+        "sqlCalls": 32,
+        "medianJsonBytes": 3797129,
+        "medianRssBytes": 104951808,
+        "rangeMs": [
+          49.877,
+          59.325
+        ]
+      },
+      "overview": {
+        "medianMs": 10.154,
+        "sqlCalls": 28,
+        "medianJsonBytes": 598625,
+        "medianRssBytes": 114716672,
+        "rangeMs": [
+          9.699,
+          16.689
+        ]
+      },
+      "httpOverview": {
+        "medianMs": 11.393,
+        "sqlCalls": 28,
+        "medianJsonBytes": 598644,
+        "medianRssBytes": 114798592,
+        "rangeMs": [
+          10.572,
+          16.567
+        ]
+      },
+      "plDefault": {
+        "medianMs": 11.18,
+        "sqlCalls": 30,
+        "medianJsonBytes": 254894,
+        "medianRssBytes": 114147328,
+        "rangeMs": [
+          10.566,
+          12.501
+        ]
+      },
+      "taskList": {
+        "medianMs": 3.609,
+        "sqlCalls": 2,
+        "medianJsonBytes": 221484,
+        "medianRssBytes": 114130944,
+        "rangeMs": [
+          3.178,
+          4.237
+        ]
+      },
+      "taskDetail": {
+        "medianMs": 1.547,
+        "sqlCalls": 10,
+        "medianJsonBytes": 8076,
+        "medianRssBytes": 113926144,
+        "rangeMs": [
+          1.322,
+          2.315
+        ]
+      },
+      "historyFirstPage": {
+        "medianMs": 2.152,
+        "sqlCalls": 1,
+        "medianJsonBytes": 34296,
+        "medianRssBytes": 114008064,
+        "rangeMs": [
+          1.947,
+          3.542
+        ]
+      },
+      "activityFirstPage": {
+        "medianMs": 0.238,
+        "sqlCalls": 1,
+        "medianJsonBytes": 12784,
+        "medianRssBytes": 114008064,
+        "rangeMs": [
+          0.192,
+          0.435
+        ]
+      },
+      "activityFacets": {
+        "medianMs": 8.683,
+        "sqlCalls": 2,
+        "medianJsonBytes": 184,
+        "medianRssBytes": 114008064,
+        "rangeMs": [
+          8.252,
+          9.146
+        ]
+      }
+    }
+  ],
+  "workspace": [
+    {
+      "files": 100,
+      "contentBytes": 25600,
+      "medianMs": 11.908,
+      "rangeMs": [
+        11.396,
+        12.21
+      ],
+      "medianRssBytes": 112185344,
+      "baselineJsonBytes": 13491
+    },
+    {
+      "files": 1000,
+      "contentBytes": 256000,
+      "medianMs": 134.06,
+      "rangeMs": [
+        131.397,
+        140.319
+      ],
+      "medianRssBytes": 112467968,
+      "baselineJsonBytes": 135891
+    },
+    {
+      "files": 10000,
+      "contentBytes": 2560000,
+      "medianMs": 1283.909,
+      "rangeMs": [
+        1266.103,
+        1356.811
+      ],
+      "medianRssBytes": 167116800,
+      "baselineJsonBytes": 1377891
+    }
+  ]
+}

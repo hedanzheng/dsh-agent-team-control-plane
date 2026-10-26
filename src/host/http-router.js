@@ -122,7 +122,8 @@ export function createControlPlaneHttpHandler({ controlPlane, coordinator, gover
         // Fail closed behind admission. Read-only fallback is permitted only
         // when the Host truly provides no connection service.
         if (connectionAvailable) await admitRequest(connection, request);
-        if (url.searchParams.get('view') === 'activity') {
+        const view = url.searchParams.get('view') || 'full';
+        if (view === 'activity') {
           const cursorCreatedAt = url.searchParams.get('cursorCreatedAt');
           const cursorId = url.searchParams.get('cursorId');
           const data = controlPlane.activityPage({
@@ -132,10 +133,32 @@ export function createControlPlaneHttpHandler({ controlPlane, coordinator, gover
             actorId: url.searchParams.get('actorId') || '',
             eventType: url.searchParams.get('eventType') || '',
             taskId: url.searchParams.get('taskId') || '',
+            includeFacets: url.searchParams.get('includeFacets') !== 'false',
           });
           sendJson(response, 200, { ok: true, data });
           return;
         }
+        if (view === 'overview') {
+          sendJson(response, 200, { ok: true, data: controlPlane.getProjectOverview(url.searchParams.get('projectId') ?? undefined) });
+          return;
+        }
+        if (view === 'task-detail') {
+          sendJson(response, 200, { ok: true, data: controlPlane.getTaskDetail({
+            projectId: url.searchParams.get('projectId'), taskId: url.searchParams.get('taskId'),
+          }) });
+          return;
+        }
+        if (view === 'history') {
+          const cursorCreatedAt = url.searchParams.get('cursorCreatedAt');
+          const cursorId = url.searchParams.get('cursorId');
+          sendJson(response, 200, { ok: true, data: controlPlane.getProjectHistoryPage({
+            projectId: url.searchParams.get('projectId'), kind: url.searchParams.get('kind'),
+            limit: url.searchParams.get('limit'),
+            cursor: cursorCreatedAt && cursorId ? { createdAt: cursorCreatedAt, id: cursorId } : null,
+          }) });
+          return;
+        }
+        if (view !== 'full') throw new ControlPlaneError('INVALID_VIEW', `unsupported read view ${view}`, 400);
         sendJson(response, 200, { ok: true, data: controlPlane.snapshot(url.searchParams.get('projectId') ?? undefined) });
         return;
       }

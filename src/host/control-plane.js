@@ -120,9 +120,10 @@ export class AgentTeamControlPlane {
     });
   }
 
-  async rescanRuntimes({ actor, operationId, cwd }) {
+  async rescanRuntimes({ actor, operationId, cwd, responseView, projectId }) {
     const who = requireActor(actor);
     if (who.type !== 'human') throw new ControlPlaneError('FORBIDDEN', 'only Human may rescan runtimes', 403);
+    if (projectId) this.requireProject(projectId);
     const op = this.assertNewOperation(operationId);
     const result = await this.runtimeScanner.scan(cwd);
     this.store.transaction(() => {
@@ -132,12 +133,13 @@ export class AgentTeamControlPlane {
       this.store.setSystemState('runtime_scan', { scannedAt: result.scannedAt, errors: result.errors }, result.scannedAt);
       this.activity({ operationId: op, eventType: 'RUNTIMES_SCANNED', actor: who, objectRef: 'runtime-catalog', summary: `Host reported ${result.runtimes.length} runtime source(s)`, at: result.scannedAt });
     });
-    return this.store.snapshot();
+    return this.mutationSnapshot(projectId, { responseView });
   }
 
-  authorizeRuntime({ actor, operationId, providerKey, authorized }) {
+  authorizeRuntime({ actor, operationId, providerKey, authorized, responseView, projectId }) {
     const who = requireActor(actor);
     if (who.type !== 'human') throw new ControlPlaneError('FORBIDDEN', 'only Human may authorize runtimes', 403);
+    if (projectId) this.requireProject(projectId);
     const op = this.assertNewOperation(operationId);
     const runtime = this.store.getRuntime(requireString(providerKey, 'providerKey', { max: 200 }));
     if (!runtime) throw new ControlPlaneError('RUNTIME_NOT_FOUND', 'runtime was not reported by the Host', 404);
@@ -148,7 +150,13 @@ export class AgentTeamControlPlane {
       this.store.setRuntimeAuthorized(runtime.providerKey, Boolean(authorized));
       this.activity({ operationId: op, eventType: authorized ? 'RUNTIME_AUTHORIZED' : 'RUNTIME_REVOKED', actor: who, objectRef: runtime.providerKey, summary: `${runtime.displayName} authorization set to ${Boolean(authorized)}` });
     });
-    return this.store.snapshot();
+    return this.mutationSnapshot(projectId, { responseView });
+  }
+
+  mutationSnapshot(projectId, input) {
+    return input?.responseView === 'overview'
+      ? this.store.getProjectOverview(projectId)
+      : this.store.snapshot(projectId);
   }
 
   createProject(input) {
@@ -231,7 +239,7 @@ export class AgentTeamControlPlane {
         at,
       });
     });
-    return this.store.snapshot(projectId);
+    return this.mutationSnapshot(projectId, input);
   }
 
   answerInterview(input) {
@@ -291,7 +299,7 @@ export class AgentTeamControlPlane {
         at,
       });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   approveCharter(input) {
@@ -354,7 +362,7 @@ export class AgentTeamControlPlane {
         VALUES(?, ?, 'TEAM', 'PENDING', ?, ?, ?)`).run(teamApprovalId, project.id, json({ members }), project.leadAgentId, at);
       this.activity({ operationId: op, projectId: project.id, eventType: 'CHARTER_APPROVED', actor: who, objectRef: charter.id, summary: `Human approved Charter v${charter.version}; PL proposed a ${members.length}-agent team`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   normalizeTeam(project, members) {
@@ -419,7 +427,7 @@ export class AgentTeamControlPlane {
       this.store.db.prepare('UPDATE projects SET version=version+1, updated_at=? WHERE id=?').run(at, project.id);
       this.activity({ operationId: op, projectId: project.id, eventType: 'TEAM_PROPOSED', actor: who, objectRef: approvalId, summary: `Team proposal contains ${members.length} member(s)`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   approveTeam(input) {
@@ -463,7 +471,7 @@ export class AgentTeamControlPlane {
       const repairSummary = repaired.changed ? `; stale Worker/Reviewer runtime rebound to ${repaired.replacement.providerKey}` : '';
       this.activity({ operationId: op, projectId: project.id, eventType: 'TEAM_APPROVED', actor: who, objectRef: approval.id, summary: `Human approved ${members.length} Agent Record(s); all are idle and no runtime was started${repairSummary}`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   replaceAgent(input) {
@@ -504,14 +512,14 @@ export class AgentTeamControlPlane {
         at,
       });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   stopProject(input) {
     const project = this.requireProject(input.projectId);
     const who = this.assertHumanOwner(project, input.actor);
     assertExpectedVersion(project, input.expectedVersion);
-    if (project.status === 'STOPPED') return this.store.snapshot(project.id);
+    if (project.status === 'STOPPED') return this.mutationSnapshot(project.id, input);
     if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'only an ACTIVE project may be stopped', 409);
     const activeRun = this.store.listTaskRuns(project.id).find((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
     if (activeRun) throw new ControlPlaneError('ACTIVE_RUN_EXISTS', `cancel active Run ${activeRun.id} before stopping the project`, 409);
@@ -540,14 +548,14 @@ export class AgentTeamControlPlane {
       this.store.db.prepare("UPDATE projects SET status='STOPPED', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
       this.activity({ operationId: op, projectId: project.id, eventType: 'PROJECT_STOPPED', actor: who, objectRef: project.id, summary: reason, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   resumeProject(input) {
     const project = this.requireProject(input.projectId);
     const who = this.assertHumanOwner(project, input.actor);
     assertExpectedVersion(project, input.expectedVersion);
-    if (project.status === 'ACTIVE') return this.store.snapshot(project.id);
+    if (project.status === 'ACTIVE') return this.mutationSnapshot(project.id, input);
     if (project.status !== 'STOPPED') {
       throw new ControlPlaneError('PROJECT_NOT_STOPPED', 'only a STOPPED project may be resumed', 409);
     }
@@ -572,14 +580,14 @@ export class AgentTeamControlPlane {
         at,
       });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   completeProject(input) {
     const project = this.requireProject(input.projectId);
     const who = this.assertHumanOwner(project, input.actor);
     assertExpectedVersion(project, input.expectedVersion);
-    if (project.status === 'COMPLETED') return this.store.snapshot(project.id);
+    if (project.status === 'COMPLETED') return this.mutationSnapshot(project.id, input);
     if (project.status !== 'ACTIVE') throw new ControlPlaneError('PROJECT_NOT_ACTIVE', 'only an ACTIVE project may be completed', 409);
     const tasks = this.store.listTasks(project.id);
     const scopedTasks = tasks.filter((task) => task.status !== 'CANCELLED');
@@ -607,7 +615,7 @@ export class AgentTeamControlPlane {
       this.store.db.prepare("UPDATE projects SET status='COMPLETED', version=version+1, updated_at=? WHERE id=?").run(at, project.id);
       this.activity({ operationId: op, projectId: project.id, eventType: 'PROJECT_COMPLETED', actor: who, objectRef: project.id, summary: `Human accepted Project completion with ${scopedTasks.length} VERIFIED Task(s)`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   deleteProject(input) {
@@ -645,7 +653,7 @@ export class AgentTeamControlPlane {
       });
     });
     return {
-      ...this.store.snapshot(),
+      ...this.mutationSnapshot(undefined, input),
       deletedProject: {
         id: project.id,
         name: project.name,
@@ -797,7 +805,7 @@ export class AgentTeamControlPlane {
       this.addTaskStateEvent({ taskId, fromStatus: 'CREATED', toStatus: status, actor: who, reason: 'formal Task created', at });
       this.activity({ operationId: op, projectId: project.id, eventType: 'TASK_CREATED', actor: who, objectRef: taskId, summary: `Formal Task created as ${status} at Charter v${definition.charterVersion}`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   updateTask(input) {
@@ -825,7 +833,7 @@ export class AgentTeamControlPlane {
       if (status !== task.status) this.addTaskStateEvent({ taskId: task.id, fromStatus: task.status, toStatus: status, actor: who, reason: 'dependencies changed', at });
       this.activity({ operationId: op, projectId: project.id, eventType: 'TASK_UPDATED', actor: who, objectRef: task.id, summary: `Task definition updated; state is ${status}`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   assignTask(input) {
@@ -849,7 +857,7 @@ export class AgentTeamControlPlane {
       this.store.db.prepare("UPDATE agents SET current_task_id=?, status='IDLE' WHERE id=?").run(task.id, agent.id);
       this.activity({ operationId: op, projectId: project.id, eventType: 'TASK_ASSIGNED', actor: who, objectRef: task.id, summary: `${task.id} assigned to ${agent.id}; runtime not started`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   unassignTask(input) {
@@ -865,7 +873,7 @@ export class AgentTeamControlPlane {
       this.store.db.prepare("UPDATE agents SET current_task_id=NULL, status='IDLE' WHERE id=? AND current_task_id=?").run(task.assignedAgentId, task.id);
       this.activity({ operationId: op, projectId: project.id, eventType: 'TASK_UNASSIGNED', actor: who, objectRef: task.id, summary: `Assignment released before any runtime start`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   transitionTask(input) {
@@ -955,7 +963,7 @@ export class AgentTeamControlPlane {
       if (toStatus === 'VERIFIED') this.refreshReadyTasks(project.id, at);
       this.activity({ operationId: op, projectId: project.id, eventType: 'TASK_STATE_CHANGED', actor: who, objectRef: task.id, summary: `${task.status} → ${toStatus}${reason ? `: ${reason}` : ''}`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   proposeTask(input) {
@@ -978,7 +986,7 @@ export class AgentTeamControlPlane {
       ) VALUES(?, ?, ?, ?, 'PENDING', NULL, NULL, NULL, ?, NULL)`).run(proposalId, project.id, agent.id, json(definition), at);
       this.activity({ operationId: op, projectId: project.id, eventType: 'TASK_PROPOSED', actor: who, objectRef: proposalId, summary: `${agent.displayName} proposed “${definition.title}”; no formal Task was created`, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   rejectTaskProposal(input) {
@@ -996,7 +1004,7 @@ export class AgentTeamControlPlane {
         .run(actorKey(who), reason, at, proposal.id);
       this.activity({ operationId: op, projectId: project.id, eventType: 'TASK_PROPOSAL_REJECTED', actor: who, objectRef: proposal.id, summary: reason, at });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   // R1.2: binding a Project to one specific PL Session is a Human-only action.
@@ -1018,7 +1026,7 @@ export class AgentTeamControlPlane {
         objectRef: plSessionId, summary: `Human bound Project to PL Session ${plSessionId}`, at,
       });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   // R1.4: Host verification commands are Human-approved per Project. The PL may
@@ -1044,7 +1052,7 @@ export class AgentTeamControlPlane {
         objectRef: commandId, summary: `Human approved verification command: ${command}`, at,
       });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   revokeVerificationCommand(input) {
@@ -1053,7 +1061,7 @@ export class AgentTeamControlPlane {
     this.assertNewOperation(input.operationId);
     const record = this.store.getVerificationCommand(project.id, requireString(input.commandId, 'commandId', { max: 128 }));
     if (!record) throw new ControlPlaneError('VERIFICATION_COMMAND_NOT_FOUND', 'verification command does not exist in this project', 404);
-    if (record.status === 'REVOKED') return this.store.snapshot(project.id);
+    if (record.status === 'REVOKED') return this.mutationSnapshot(project.id, input);
     const op = input.operationId;
     const at = now();
     this.store.transaction(() => {
@@ -1063,7 +1071,7 @@ export class AgentTeamControlPlane {
         objectRef: record.id, summary: `Human revoked verification command: ${record.command}`, at,
       });
     });
-    return this.store.snapshot(project.id);
+    return this.mutationSnapshot(project.id, input);
   }
 
   // Resolves PL/Panel-selected verification command IDs to the Project's
@@ -1092,7 +1100,34 @@ export class AgentTeamControlPlane {
       eventType: input.eventType ? requireString(input.eventType, 'eventType', { max: 128 }) : '',
       taskId: input.taskId ? requireString(input.taskId, 'taskId', { max: 128 }) : '',
     });
-    return { ...result, facets: this.store.activityFacets(project.id) };
+    return input.includeFacets === false ? result : { ...result, facets: this.store.activityFacets(project.id) };
+  }
+
+  getProjectOverview(projectId) {
+    if (projectId) this.requireProject(projectId);
+    return this.store.getProjectOverview(projectId);
+  }
+
+  getTaskDetail(input) {
+    const project = this.requireProject(input.projectId);
+    const taskId = requireString(input.taskId, 'taskId', { max: 128 });
+    const detail = this.store.getTaskDetail(project.id, taskId);
+    if (!detail) throw new ControlPlaneError('TASK_NOT_FOUND', `Task ${taskId} does not exist in this Project`, 404);
+    return { ...detail, project, charter: this.store.getCurrentCharter(project.id),
+      verificationCommands: this.store.listVerificationCommands(project.id).filter((item) => item.status === 'APPROVED') };
+  }
+
+  getProjectHistoryPage(input) {
+    const project = this.requireProject(input.projectId);
+    const kind = requireString(input.kind, 'kind', { max: 32 });
+    if (!['task-runs', 'reviews', 'evidence', 'approvals', 'requests', 'findings', 'plan-checks'].includes(kind)) {
+      throw new ControlPlaneError('INVALID_HISTORY_KIND', `unsupported history kind ${kind}`, 400);
+    }
+    const cursor = input.cursor?.createdAt && input.cursor?.id ? {
+      createdAt: requireString(input.cursor.createdAt, 'cursor.createdAt', { max: 64 }),
+      id: requireString(input.cursor.id, 'cursor.id', { max: 128 }),
+    } : null;
+    return { kind, projectId: project.id, ...this.store.getProjectHistoryPage(project.id, kind, cursor, input.limit) };
   }
 
   snapshot(projectId) {

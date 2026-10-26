@@ -84,6 +84,22 @@ function httpFixture({ connection = peerAdmitting({ principal: { kind: 'owner', 
       return project;
     },
     snapshot(projectId) { calls.push(['snapshot', projectId]); return { selected: { project: { ...project } } }; },
+    getProjectOverview(projectId) {
+      calls.push(['getProjectOverview', projectId]);
+      this.requireProject(projectId);
+      return { view: 'overview', selected: { project: { ...project } } };
+    },
+    getTaskDetail(input) {
+      calls.push(['getTaskDetail', input]);
+      this.requireProject(input.projectId);
+      if (input.taskId !== 'TASK-1') throw new ControlPlaneError('TASK_NOT_FOUND', 'cross-project task', 404);
+      return { projectId: project.id, task: { id: 'TASK-1' } };
+    },
+    getProjectHistoryPage(input) {
+      calls.push(['getProjectHistoryPage', input]);
+      this.requireProject(input.projectId);
+      return { projectId: project.id, kind: input.kind, items: [], hasMore: false, nextCursor: null };
+    },
     activityPage(input) { calls.push(['activityPage', input]); return { items: [], hasMore: false, nextCursor: null, facets: { actors: [], eventTypes: [] } }; },
     createTask(input) { calls.push(['createTask', input]); return { ok: true }; },
     rescanRuntimes(input) { calls.push(['rescanRuntimes', input]); return { ok: true }; },
@@ -178,9 +194,46 @@ test('Activity GET is admitted and forwards only server-side page/filter paramet
   assert.equal(response.state.status, 200);
   assert.deepEqual(calls.find(([name]) => name === 'activityPage')[1], {
     projectId: project.id, limit: '50', actorId: 'AGENT-PL-1', eventType: 'TASK_UPDATED', taskId: 'TASK-1',
-    cursor: { createdAt: '2026-10-23T00:00:00.000Z', id: 'ACTIVITY-1' },
+    cursor: { createdAt: '2026-10-23T00:00:00.000Z', id: 'ACTIVITY-1' }, includeFacets: true,
   });
   assert.equal(calls.some(([name]) => name === 'snapshot'), false);
+});
+
+test('O3 overview, Task detail and history GET preserve admission, project scope and full diagnostic path', async () => {
+  const { calls, handler, project } = httpFixture();
+  for (const [view, expected] of [['overview', 'getProjectOverview'], ['task-detail', 'getTaskDetail'], ['history', 'getProjectHistoryPage'], ['full', 'snapshot']]) {
+    const query = new URLSearchParams({ view, projectId: project.id, taskId: 'TASK-1', kind: 'task-runs' });
+    const response = mockResponse();
+    await handler(mockRequest({ url: `${ROUTE}?${query}` }), response);
+    assert.equal(response.state.status, 200, view);
+    assert.equal(calls.at(-1)[0], expected);
+  }
+  for (const query of [
+    new URLSearchParams({ view: 'task-detail', projectId: project.id, taskId: 'FOREIGN-TASK' }),
+    new URLSearchParams({ view: 'history', projectId: 'FOREIGN-PROJECT', kind: 'task-runs' }),
+  ]) {
+    const response = mockResponse();
+    await handler(mockRequest({ url: `${ROUTE}?${query}` }), response);
+    assert.equal(response.state.status, 404);
+  }
+  const denied = httpFixture({ connection: peerAdmitting(null) });
+  const response = mockResponse();
+  await denied.handler(mockRequest({ url: `${ROUTE}?view=task-detail&projectId=${project.id}&taskId=TASK-1` }), response);
+  assert.equal(response.state.status, 401);
+  assert.equal(denied.calls.length, 0);
+});
+
+test('O3 Activity load-more forwards includeFacets=false and mutation responseView reaches core', async () => {
+  const { calls, handler, project } = httpFixture();
+  const activity = mockResponse();
+  await handler(mockRequest({ url: `${ROUTE}?view=activity&projectId=${project.id}&includeFacets=false` }), activity);
+  assert.equal(activity.state.status, 200);
+  assert.equal(calls.at(-1)[1].includeFacets, false);
+  const changed = mockResponse();
+  await handler(mockRequest({ method: 'POST', headers: { 'content-type': 'application/json' },
+    body: { action: 'create-task', projectId: project.id, responseView: 'overview', expectedProjectVersion: project.version } }), changed);
+  assert.equal(changed.state.status, 200);
+  assert.equal(calls.at(-1)[1].responseView, 'overview');
 });
 
 test('POST requires an application/json Content-Type', async () => {

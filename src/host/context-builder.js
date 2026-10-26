@@ -1,17 +1,10 @@
 import { ControlPlaneError } from '../shared/contracts.js';
 import { RESULT_MARKERS } from './result-parser.js';
 
-function latestByTask(results) {
-  const map = new Map();
-  for (const result of results) map.set(result.taskId, result);
-  return map;
-}
-
 export function buildTaskRunContext(store, { project, task, agent, verificationCommands }) {
   const charter = store.getCurrentCharter(project.id);
   if (!charter || charter.status !== 'APPROVED') throw new ControlPlaneError('CHARTER_NOT_APPROVED', 'Task execution requires the approved Charter', 409);
-  const results = store.listResults(project.id);
-  const resultByTask = latestByTask(results);
+  const resultByTask = store.latestResultsForTasks([task.id, ...task.dependencies]);
   const dependencyResults = task.dependencies.map((dependencyId) => {
     const dependency = store.getTask(dependencyId);
     const result = resultByTask.get(dependencyId);
@@ -24,14 +17,13 @@ export function buildTaskRunContext(store, { project, task, agent, verificationC
       } : null,
     };
   });
-  const previous = results.filter((result) => result.taskId === task.id).at(-1);
-  const decisions = store.listDecisions(project.id, 'APPROVED').slice(-12).map((decision) => ({
+  const previous = resultByTask.get(task.id);
+  const decisions = store.recentApprovedDecisions(project.id, 12).map((decision) => ({
     id: decision.id, title: decision.title, body: decision.body, approvedAt: decision.approvedAt,
   }));
-  const requests = store.listRequests(project.id).filter((request) => request.sourceTaskId === task.id && request.responseId);
-  const latestRequest = requests.at(-1);
+  const latestRequest = store.latestResolvedRequestForTask(task.id);
   const response = latestRequest ? store.getResponse(latestRequest.responseId) : null;
-  const reviewHistory = store.listReviews(project.id).filter((review) => review.taskId === task.id).slice(-5).map((review) => ({
+  const reviewHistory = store.recentReviewsForTask(task.id, 5).map((review) => ({
     id: review.id, resultId: review.resultId, reviewerRole: review.reviewerRole,
     decision: review.decision, issues: review.issues, evidenceRefs: review.evidenceRefs,
   }));

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { performance } from 'node:perf_hooks';
 
 import { ControlPlaneStore } from '../../src/host/store.js';
@@ -28,7 +29,7 @@ function insert(db, table, columns, values) {
   return db.prepare(sql).run(...values);
 }
 
-function seed(store, scale, root) {
+export function seed(store, scale, root) {
   const db = store.db;
   const counts = { ...scale, results: 0, evidence: 0, verificationRuns: 0, reviews: 0, requests: 0, responses: 0, dependencies: 0 };
   store.transaction(() => {
@@ -148,7 +149,8 @@ async function main() {
     const store = new ControlPlaneStore(join(root, 'fixture.sqlite'));
     try {
       const records = seed(store, scale, root);
-      const plane = { requireProject: (id) => store.getProject(id), snapshot: (id) => store.snapshot(id) };
+      const plane = { requireProject: (id) => store.getProject(id), snapshot: (id) => store.snapshot(id),
+        getProjectOverview: (id) => store.getProjectOverview(id), getTaskDetail: ({ projectId, taskId }) => store.getTaskDetail(projectId, taskId) };
       const tools = createPLBridgeTools({ controlPlane: plane, store, adapters: { isLiveParent: () => true, bindProjectParent() {} } });
       const stateTool = tools.find((tool) => tool.name === 'agent_team_project_state');
       const result = {
@@ -156,8 +158,12 @@ async function main() {
         records,
         sqliteAndWalBytes: statSync(store.path).size + statSync(`${store.path}-wal`).size,
         snapshot: await measure(store, () => store.snapshot(projectId)),
+        overview: await measure(store, () => store.getProjectOverview(projectId)),
+        httpOverview: await measure(store, () => ({ ok: true, data: store.getProjectOverview(projectId) })),
         plDefault: await measure(store, () => stateTool.execute({ project_id: projectId }, { agent: { id: 'SESSION-PL' } })),
         taskList: await measure(store, () => store.listTasks(projectId)),
+        taskDetail: await measure(store, () => store.getTaskDetail(projectId, 'TASK-0')),
+        historyFirstPage: await measure(store, () => store.getProjectHistoryPage(projectId, 'task-runs', null, 50)),
         activityFirstPage: await measure(store, () => store.listActivityPage({ projectId, limit: 50 })),
         activityFacets: await measure(store, () => store.activityFacets(projectId)),
       };
@@ -201,4 +207,6 @@ async function main() {
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
-main().catch((error) => { console.error(error); process.exitCode = 1; });
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => { console.error(error); process.exitCode = 1; });
+}

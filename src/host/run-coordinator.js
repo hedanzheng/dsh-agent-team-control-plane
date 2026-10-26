@@ -125,7 +125,7 @@ export class TaskRunCoordinator {
       .catch((error) => this.logger.error(`Task Run ${runId} coordinator failure: ${error instanceof Error ? error.stack ?? error.message : String(error)}`))
       .finally(() => this.jobs.delete(runId));
     this.jobs.set(runId, job);
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
   async execute(spec) {
@@ -402,7 +402,7 @@ export class TaskRunCoordinator {
       this.store.db.prepare("UPDATE task_runs SET cancel_requested_at=?, watchdog_state=? WHERE id=?").run(at, requested ? 'CANCEL_REQUESTED' : 'CANCEL_PENDING_NOT_LIVE', run.id);
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: 'TASK_RUN_CANCEL_REQUESTED', actor: who, objectRef: run.id, summary: requested ? 'Runtime abort signal sent' : 'Run handle not live; outcome remains pending/unknown', at });
     });
-    return this.store.snapshot(project.id);
+    return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
   recoverInterruptedRuns() {
