@@ -7,7 +7,7 @@ test('R7 Panel blocks unverified Runs and exposes explicit Human/PL recovery act
   const source = readFileSync(resolve('client.js'), 'utf8');
   assert.doesNotMatch(source, /不使用验证命令（结果将始终为 PARTIAL）/);
   assert.match(source, /请选择验证命令（必选）/);
-  assert.match(source, /disabled: busy \|\| !commandByTask\[task\.id\]/);
+  assert.match(source, /disabled: busy \|\| !approvedCommandIds\.has\(commandByTask\[task\.id\]\)/);
   assert.match(source, /data-testid': `owner-accept-risk-\$\{task\.id\}`/);
   assert.match(source, /acceptRisk/);
   assert.match(source, /data-testid': `cancel-task-\$\{task\.id\}`/);

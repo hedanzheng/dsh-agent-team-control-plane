@@ -439,16 +439,22 @@ export class CollaborationGovernance {
       if (!reviewerApproval) throw new ControlPlaneError('REVIEWER_APPROVAL_REQUIRED', 'Independent Reviewer approval is required before PL decision', 409);
     }
     if (task.reviewPolicy !== 'REVIEWER_PL' && reviewerRole === 'REVIEWER') throw new ControlPlaneError('PL_REVIEW_REQUIRED', 'This Task is routed to PL review', 409);
-    // R2.2: a Result with incomplete Host verification (PARTIAL outcome or any
-    // FAILED evidence) must not be VERIFIED by routine approval. Only the Human
-    // Owner may explicitly accept the unverified risk.
-    const failedEvidence = this.store.listEvidence(task.projectId).filter((item) => item.resultId === result.id && item.status === 'FAILED');
-    const hostVerificationIncomplete = result.outcome !== 'SUCCESS' || failedEvidence.length > 0;
+    // R2.2/O2: a SUCCESS label alone is insufficient; require the current
+    // Result's referenced, verified Host command evidence as in auto-verify.
+    const resultEvidence = this.store.listEvidence(task.projectId).filter((item) => item.resultId === result.id);
+    const evidenceById = new Map(resultEvidence.map((item) => [item.id, item]));
+    const missingEvidence = result.evidenceRefs.some((ref) => !evidenceById.has(ref));
+    const verifiedCommand = result.evidenceRefs.some((ref) => {
+      const item = evidenceById.get(ref);
+      return item?.kind === 'COMMAND' && item.status === 'VERIFIED';
+    });
+    const failedEvidence = resultEvidence.some((item) => item.status === 'FAILED' || (item.kind === 'FILE' && item.status !== 'VERIFIED'));
+    const hostVerificationIncomplete = result.outcome !== 'SUCCESS' || missingEvidence || !verifiedCommand || failedEvidence;
     let riskAccepted = false;
     if (decision === 'APPROVE' && hostVerificationIncomplete) {
       riskAccepted = actor.type === 'human' && actor.id === project.ownerId && input.acceptRisk === true;
       if (!riskAccepted) {
-        throw new ControlPlaneError('VERIFICATION_INCOMPLETE', 'Host verification is incomplete (PARTIAL outcome or FAILED evidence); only the Human Owner may explicitly accept this risk', 409);
+        throw new ControlPlaneError('VERIFICATION_INCOMPLETE', 'Host verification is incomplete (PARTIAL outcome, missing verified COMMAND evidence, missing or FAILED evidence); only the Human Owner may explicitly accept this risk', 409);
       }
     }
     const operationId = this.controlPlane.assertNewOperation(input.operationId);

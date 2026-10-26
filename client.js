@@ -398,9 +398,36 @@ window.__ModuleLoader__.load({
       const evidence = selected.evidence || [];
       const workers = selected.agents.filter((agent) => agent.role === 'WORKER' && agent.status === 'IDLE' && !agent.currentTaskId);
       const approvedCommands = (selected.verificationCommands || []).filter((command) => command.status === 'APPROVED');
+      const approvedCommandIds = new Set(approvedCommands.map((command) => command.id));
+      const [filter, setFilter] = React.useState(readOnly ? 'all' : 'active');
+      const [page, setPage] = React.useState(0);
+      React.useEffect(() => { if (readOnly) { setFilter('all'); setPage(0); } }, [readOnly]);
+      const pageSize = 30;
+      const runsByTask = new Map();
+      for (const run of runs) {
+        if (!runsByTask.has(run.taskId)) runsByTask.set(run.taskId, []);
+        runsByTask.get(run.taskId).push(run);
+      }
+      const resultByRun = new Map(results.map((result) => [result.runId, result]));
+      const evidenceByResult = new Map();
+      for (const item of evidence) {
+        if (!evidenceByResult.has(item.resultId)) evidenceByResult.set(item.resultId, []);
+        evidenceByResult.get(item.resultId).push(item);
+      }
+      const taskMatches = (task) => filter === 'all'
+        || (filter === 'active' && ['PENDING', 'READY', 'RUNNING'].includes(task.status))
+        || (filter === 'waiting' && task.status === 'WAITING')
+        || (filter === 'review' && task.status === 'SUBMITTED')
+        || (filter === 'verified' && task.status === 'VERIFIED')
+        || (filter === 'closed' && ['FAILED', 'CANCELLED'].includes(task.status));
+      const filteredTasks = tasks.filter(taskMatches);
+      const totalPages = Math.max(1, Math.ceil(filteredTasks.length / pageSize));
+      const currentPage = Math.min(page, totalPages - 1);
+      const visibleTasks = filteredTasks.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
       const [commandForm, setCommandForm] = React.useState({ displayName: '', command: '' });
       const [commandByTask, setCommandByTask] = React.useState({});
       const [assigneeByTask, setAssigneeByTask] = React.useState({});
+      const [expandedTasks, setExpandedTasks] = React.useState({});
       const [form, setForm] = React.useState({
         title: '', goal: '', allowed: '', forbidden: '', acceptance: '', dependencies: '',
         controlLevel: 'IMPORTANT', reviewPolicy: 'PL',
@@ -411,11 +438,38 @@ window.__ModuleLoader__.load({
           style: styles.input, value: form[name], 'data-testid': `task-${name}`,
           onChange: (event) => setForm({ ...form, [name]: event.target.value }),
         }));
+      const renderRun = (run, latest) => {
+        const result = resultByRun.get(run.id);
+        const runEvidence = result ? evidenceByResult.get(result.id) || [] : [];
+        const active = ['CREATED', 'STARTING', 'RUNNING'].includes(run.status);
+        const needsPlDiagnosis = ['FAILED', 'CANNOT_START', 'UNKNOWN', 'TIMED_OUT'].includes(run.status)
+          || ['FAILED', 'CANNOT_START', 'UNKNOWN', 'TIMED_OUT'].includes(run.terminalKind);
+        return h('details', { key: run.id, open: latest, style: styles.card, 'data-testid': 'task-run', 'data-run-id': run.id },
+          h('summary', { style: { cursor: 'pointer' } }, `第 ${run.attempt} 次运行 · ${run.status} · ${result?.outcome || '等待结果'}`),
+          h('div', { style: styles.muted }, `${run.id} · ${run.providerKey} · watchdog ${run.watchdogState}`),
+          result && h('div', { style: { marginTop: 5 } },
+            h('b', null, `${result.outcome}: `), result.changeSummary,
+            h('div', { style: styles.muted }, `Verified actions: ${(result.verifiedActions || []).join('；') || 'none'}`),
+            result.unresolved?.length > 0 && h('div', { style: { ...styles.error, marginTop: 5 } }, `Unresolved: ${result.unresolved.join('；')}`),
+            runEvidence.map((item) => h('div', { key: item.id, style: styles.muted }, `${item.kind} ${item.status} · ${item.ref}`))),
+          needsPlDiagnosis && h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' }, 'data-testid': `pl-diagnosis-${run.id}` },
+            h('b', null, '下一步交给 PL 诊断'),
+            h('div', { style: styles.muted }, '从 Harness 左侧栏打开本 Project 的 PL 对话，让 PL 读取控制面状态、定位失败原因并决定修复或重试；控制面不会自动盲目重跑。'),
+            (run.errorCode || run.errorMessage) && h('details', { style: { marginTop: 5 } },
+              h('summary', { style: { cursor: 'pointer' } }, '失败技术详情'),
+              h('div', { style: styles.muted }, `${run.errorCode || 'RUNTIME_FAILURE'}：${run.errorMessage || 'Host 未提供详细错误'}`))),
+          !readOnly && active && h(Button, {
+            disabled: busy, 'data-testid': `cancel-run-${run.id}`,
+            onClick: () => act('cancel-task-run', { actor: { type: 'pl', id: selected.project.leadAgentId }, runId: run.id }),
+          }, '取消 Run'));
+      };
       return h('div', { style: styles.section, 'data-testid': 'task-board' },
         h('strong', null, `任务与运行记录 · ${tasks.length}`),
         readOnly && h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' }, 'data-testid': 'task-read-only' },
           `${projectStatusLabel(selected.project.status)}：以下内容为完整历史记录。恢复 Project 后可以创建和执行新任务，已取消的旧任务不会自动复活。`),
-        !readOnly && h('div', { style: styles.card, 'data-testid': 'task-form' },
+        !readOnly && h('details', { style: styles.card, 'data-testid': 'task-form' },
+          h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '新建正式 Task'),
+          h('div', { style: { marginTop: 10 } },
           field('title', '标题'), field('goal', '目标', true), field('allowed', '允许范围（换行分隔）'),
           field('forbidden', '禁止范围（可空）'), field('acceptance', '验收标准（换行分隔）', true),
           field('dependencies', '依赖 Task ID（逗号分隔，可空）'),
@@ -442,8 +496,10 @@ window.__ModuleLoader__.load({
               acceptance: split(form.acceptance), dependencies: split(form.dependencies),
               controlLevel: form.controlLevel, reviewPolicy: form.reviewPolicy,
             }),
-          }, 'PL 创建正式 Task')),
-        !readOnly && h('div', { style: styles.card, 'data-testid': 'verification-command-form' },
+          }, 'PL 创建正式 Task'))),
+        !readOnly && h('details', { style: styles.card, 'data-testid': 'verification-command-form' },
+          h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `验证命令白名单 · ${approvedCommands.length}（Human 批准）`),
+          h('div', { style: { marginTop: 10 } },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
             h('strong', null, `验证命令白名单 · ${approvedCommands.length}（Human 批准）`)),
           h('div', { style: { ...styles.muted, marginTop: 4 } }, 'Worker 运行只能引用此处已批准的 PowerShell 命令 ID；PL 无法提交任意命令文本，新命令必须由负责人批准。'),
@@ -462,7 +518,7 @@ window.__ModuleLoader__.load({
               projectId: selected.project.id,
               displayName: commandForm.displayName.trim() || commandForm.command.trim().slice(0, 60),
               command: commandForm.command.trim(), timeoutMs: 120000,
-            }).then(() => setCommandForm({ displayName: '', command: '' })),
+            }).then((ok) => { if (ok) setCommandForm({ displayName: '', command: '' }); }),
           }, 'Human 批准命令'),
           approvedCommands.map((command) => h('div', { key: command.id, style: { ...styles.row, marginTop: 7 } },
             h('span', { style: styles.tag }, command.id),
@@ -470,14 +526,19 @@ window.__ModuleLoader__.load({
             h(Button, {
               disabled: busy, 'data-testid': `revoke-verification-command-${command.id}`,
               onClick: () => act('revoke-verification-command', { projectId: selected.project.id, commandId: command.id }),
-            }, '撤销')))),
-        tasks.map((task) => h('div', { key: task.id, style: styles.card, 'data-testid': 'task-record', 'data-task-id': task.id },
+            }, '撤销'))))),
+        h('div', { style: { ...styles.row, marginTop: 12 }, 'data-testid': 'task-filters' },
+          [['active', '进行中'], ['waiting', '等待'], ['review', '待审核'], ['verified', '已验证'], ['closed', '已取消/失败'], ['all', '全部']].map(([value, label]) =>
+            h(Button, { key: value, 'data-testid': `task-filter-${value}`, 'aria-pressed': filter === value,
+              onClick: () => { setFilter(value); setPage(0); } }, `${label} · ${tasks.filter((task) => value === 'all' ||
+                (value === 'active' && ['PENDING', 'READY', 'RUNNING'].includes(task.status)) ||
+                (value === 'waiting' && task.status === 'WAITING') || (value === 'review' && task.status === 'SUBMITTED') ||
+                (value === 'verified' && task.status === 'VERIFIED') || (value === 'closed' && ['FAILED', 'CANCELLED'].includes(task.status))).length}`))),
+        visibleTasks.map((task) => h('div', { key: task.id, style: styles.card, 'data-testid': 'task-record', 'data-task-id': task.id },
           h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
             h('b', null, task.title), h('span', { style: styles.tag }, taskStatusLabel(task.status))),
-          h('div', { style: styles.muted }, `${task.id} · v${task.version} · Charter v${task.charterVersion}`),
-          h('div', null, `${task.controlLevel} / ${task.reviewPolicy} · assignee ${task.assignedAgentId || 'none'}`),
-          h('div', { style: styles.muted }, `Dependencies: ${task.dependencies.join(', ') || 'none'}`),
-          task.waiting && h('div', { style: styles.muted }, `Waiting: ${task.waiting.reason} · ${task.waiting.onRef}`),
+          h('div', { style: styles.muted }, `负责人：${selected.agents.find((agent) => agent.id === task.assignedAgentId)?.displayName || '未指派'} · 依赖 ${task.dependencies?.length || 0} 项 · 最新运行：${(runsByTask.get(task.id) || []).at(-1)?.status || '尚未运行'}`),
+          task.waiting && h('div', { style: styles.muted }, `等待：${task.waiting.reason}`),
           !readOnly && ['PENDING', 'READY', 'SUBMITTED'].includes(task.status) && h(Button, {
             disabled: busy,
             'data-testid': `cancel-task-${task.id}`,
@@ -523,45 +584,30 @@ window.__ModuleLoader__.load({
                   .concat(approvedCommands.map((command) => h('option', { key: command.id, value: command.id }, `${command.displayName} · ${command.id}`))))
               : h('div', { style: styles.error }, '尚无已批准验证命令。请先在上方批准命令，之后才能启动 Run。'),
             h(Button, {
-              disabled: busy || !commandByTask[task.id], 'data-testid': `start-run-${task.id}`,
-              onClick: () => act('start-task-run', {
-                actor: { type: 'pl', id: selected.project.leadAgentId }, projectId: selected.project.id,
-                taskId: task.id, expectedVersion: task.version,
-                verification_command_ids: commandByTask[task.id] ? [commandByTask[task.id]] : [],
-                writeIntent: true,
-              }),
-            }, '启动一次性 Worker Run')))),
-        runs.length > 0 && h('div', { style: styles.section, 'data-testid': 'task-runs' },
-          h('strong', null, `Task Runs · ${runs.length}`),
-          [...runs].reverse().map((run) => {
-            const result = results.find((item) => item.runId === run.id);
-            const runEvidence = result ? evidence.filter((item) => item.resultId === result.id) : [];
-            const active = ['CREATED', 'STARTING', 'RUNNING'].includes(run.status);
-            const needsPlDiagnosis = ['FAILED', 'CANNOT_START', 'UNKNOWN', 'TIMED_OUT'].includes(run.status)
-              || ['FAILED', 'CANNOT_START', 'UNKNOWN', 'TIMED_OUT'].includes(run.terminalKind);
-            return h('div', { key: run.id, style: styles.card, 'data-testid': 'task-run', 'data-run-id': run.id },
-              h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-                h('b', null, `${run.id} · attempt ${run.attempt}`), h('span', { style: styles.tag }, run.status)),
-              h('div', { style: styles.muted }, `${run.taskId} · ${run.providerKey} · watchdog ${run.watchdogState}`),
-              h('div', { style: styles.muted }, `Stage: ${active ? run.status : `${run.terminalKind || run.status} → Result ${result?.outcome || 'pending'}`}`),
-              result && h('div', { style: { marginTop: 5 } },
-                h('b', null, `${result.outcome}: `), result.changeSummary,
-                h('div', { style: styles.muted }, `Verified actions: ${result.verifiedActions.join('；') || 'none'}`),
-                result.unresolved?.length > 0 && h('div', { style: { ...styles.error, marginTop: 5 } }, `Unresolved: ${result.unresolved.join('；')}`),
-                runEvidence.map((item) => h('div', { key: item.id, style: styles.muted }, `${item.kind} ${item.status} · ${item.ref}`))),
-              needsPlDiagnosis && h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' }, 'data-testid': `pl-diagnosis-${run.id}` },
-                h('b', null, '下一步交给 PL 诊断'),
-                h('div', { style: styles.muted }, '从 Harness 左侧栏打开本 Project 的 PL 对话，让 PL 读取控制面状态、定位失败原因并决定修复或重试；控制面不会自动盲目重跑。'),
-                (run.errorCode || run.errorMessage) && h('details', { style: { marginTop: 5 } },
-                  h('summary', { style: { cursor: 'pointer' } }, '失败技术详情'),
-                  h('div', { style: styles.muted }, `${run.errorCode || 'RUNTIME_FAILURE'}：${run.errorMessage || 'Host 未提供详细错误'}`))),
-              !readOnly && active && h(Button, {
-                disabled: busy, 'data-testid': `cancel-run-${run.id}`,
-                onClick: () => act('cancel-task-run', {
-                  actor: { type: 'pl', id: selected.project.leadAgentId }, runId: run.id,
-                }),
-              }, '取消 Run'));
-          })),
+              disabled: busy || !approvedCommandIds.has(commandByTask[task.id]), 'data-testid': `start-run-${task.id}`,
+              onClick: () => {
+                if (!approvedCommandIds.has(commandByTask[task.id])) return;
+                return act('start-task-run', {
+                  actor: { type: 'pl', id: selected.project.leadAgentId }, projectId: selected.project.id,
+                  taskId: task.id, expectedVersion: task.version,
+                  verification_command_ids: [commandByTask[task.id]], writeIntent: true,
+                });
+              },
+            }, '启动一次性 Worker Run')),
+          h('details', { style: { marginTop: 8 }, 'data-testid': 'task-details',
+            onToggle: (event) => setExpandedTasks((items) => ({ ...items, [task.id]: event.currentTarget.open })) },
+            h('summary', { style: { cursor: 'pointer' } }, `详情与运行历史 · ${(runsByTask.get(task.id) || []).length} 次`),
+            expandedTasks[task.id] && h('div', null,
+              h('div', { style: styles.muted }, `${task.id} · v${task.version} · Charter v${task.charterVersion}`),
+              h('div', null, `${task.controlLevel} / ${task.reviewPolicy} · assignee ${task.assignedAgentId || 'none'}`),
+              h('div', { style: styles.muted }, `Dependencies: ${(task.dependencies || []).join(', ') || 'none'}`),
+              h('div', { style: styles.muted }, `Scope: ${JSON.stringify(task.scope || {})}`),
+              task.waiting && h('div', { style: styles.muted }, `Waiting: ${task.waiting.reason} · ${task.waiting.onRef}`),
+              h('div', { 'data-testid': 'task-runs' }, [...(runsByTask.get(task.id) || [])].reverse().map((run, index) => renderRun(run, index === 0))))))),
+        totalPages > 1 && h('div', { style: { ...styles.row, marginTop: 10 }, 'data-testid': 'task-pagination' },
+          h(Button, { disabled: currentPage === 0, onClick: () => setPage(currentPage - 1) }, '上一页'),
+          h('span', null, `${currentPage + 1} / ${totalPages}`),
+          h(Button, { disabled: currentPage + 1 >= totalPages, onClick: () => setPage(currentPage + 1) }, '下一页')),
         proposals.length > 0 && h('div', { style: styles.section, 'data-testid': 'task-proposals' },
           h('strong', null, `Task Proposals · ${proposals.length}`),
           proposals.map((proposal) => h('div', { key: proposal.id, style: styles.card, 'data-testid': 'task-proposal' },
@@ -578,51 +624,64 @@ window.__ModuleLoader__.load({
       const findings = selected.findings || [];
       const planChecks = selected.planChecks || [];
       const submitted = (selected.tasks || []).filter((task) => task.status === 'SUBMITTED');
-      const [responseBody, setResponseBody] = React.useState('');
-      const [reviewIssue, setReviewIssue] = React.useState('');
-      const [planNotes, setPlanNotes] = React.useState('Current evidence and dependencies remain aligned with the approved Charter.');
+      const [responseDrafts, setResponseDrafts] = React.useState({});
+      const [reviewIssues, setReviewIssues] = React.useState({});
+      const [planNotes, setPlanNotes] = React.useState({});
+      const [historyOpen, setHistoryOpen] = React.useState(false);
       const lead = selected.project.leadAgentId;
       const reviewer = selected.agents.find((agent) => agent.role === 'REVIEWER' && !['REPLACED', 'UNAVAILABLE'].includes(agent.status));
       const evidenceFor = (task) => (selected.results.find((item) => item.id === task.resultId)?.evidenceRefs || []).slice(0, 4);
-      const review = (task, actor, decision, acceptRisk = false) => act('submit-review', {
-        actor, projectId: selected.project.id, taskId: task.id, decision,
-        issues: decision === 'REJECT' ? [reviewIssue.trim() || 'Revision required by reviewer'] : [],
-        evidenceRefs: evidenceFor(task),
-        acceptRisk,
-      });
+      const evidenceById = new Map((selected.evidence || []).map((item) => [item.id, item]));
+      const verificationRisk = (task) => {
+        const result = selected.results.find((item) => item.id === task.resultId);
+        if (!result) return ['Result 缺失'];
+        const rows = (result.evidenceRefs || []).map((ref) => evidenceById.get(ref)).filter((item) => item?.resultId === result.id);
+        const reasons = [];
+        if (result.outcome !== 'SUCCESS') reasons.push(`Result ${result.outcome}`);
+        if (!rows.some((item) => item.kind === 'COMMAND' && item.status === 'VERIFIED')) reasons.push('缺失已验证的 Host 命令 Evidence');
+        for (const ref of result.evidenceRefs || []) if (evidenceById.get(ref)?.resultId !== result.id) reasons.push(`Evidence 缺失：${ref}`);
+        for (const item of rows.filter((entry) => entry.status === 'FAILED')) reasons.push(`Evidence 失败：${item.kind} ${item.ref || item.id}`);
+        for (const item of rows.filter((entry) => entry.kind === 'FILE' && entry.status !== 'VERIFIED' && entry.status !== 'FAILED')) reasons.push(`文件 Evidence 尚未验证：${item.ref || item.id}`);
+        return reasons;
+      };
+      const review = async (task, actor, decision, acceptRisk = false) => {
+        const ok = await act('submit-review', {
+          actor, projectId: selected.project.id, taskId: task.id, decision,
+          issues: decision === 'REJECT' ? [reviewIssues[task.id]?.trim() || 'Revision required by reviewer'] : [],
+          evidenceRefs: evidenceFor(task), acceptRisk,
+        });
+        if (ok) setReviewIssues((drafts) => { const next = { ...drafts }; delete next[task.id]; return next; });
+      };
+      const openRequests = requests.filter((item) => ['PENDING', 'IN_PROGRESS'].includes(item.status));
+      const openFindings = findings.filter((item) => item.status !== 'CLOSED');
+      const pendingPlans = planChecks.filter((item) => item.status === 'PENDING');
+      const pendingApprovals = (selected.approvals || []).filter((item) => item.status === 'PENDING');
       return h('div', { style: styles.section, 'data-testid': 'governance-panel' },
         h('strong', null, 'Requests · Reviews · Findings · Plan Checks'),
         readOnly && h('div', { style: { ...styles.card, background: 'var(--dsw-alias-surface-subtle)' } },
           `${projectStatusLabel(selected.project.status)}：审批与治理记录为只读。恢复 Project 后可继续处理新的治理事项。`),
-        h('div', { style: styles.section, 'data-testid': 'approval-history' },
-          h('b', null, `Approval History · ${selected.approvals.length}`),
-          [...selected.approvals].reverse().map((approval) => h('div', { key: approval.id, style: styles.card },
-            h('span', null, `${approval.kind} · `), h('span', { style: styles.tag }, approval.status),
-            h('div', { style: styles.muted }, `${approval.id} · requested ${approval.requestedBy}`)))),
-        h('div', { style: styles.section, 'data-testid': 'request-mailbox' },
-          h('b', null, `Request Mailbox · ${requests.length}`),
-          [...requests].reverse().map((requestItem) => {
-            const response = responses.find((item) => item.requestId === requestItem.id);
-            const target = selected.agents.find((agent) => agent.id === requestItem.toAgentId);
-            return h('div', { key: requestItem.id, style: styles.card, 'data-testid': 'request-record' },
-              h('div', { style: { ...styles.row, justifyContent: 'space-between' } }, h('b', null, requestItem.id), h('span', { style: styles.tag }, requestItem.status)),
-              h('div', null, `${requestItem.fromAgentId} → ${requestItem.toAgentId}`),
-              h('div', { style: styles.muted }, requestItem.body),
-              response && h('div', null, h('b', null, `${response.outcome}: `), response.body),
-              !readOnly && ['PENDING', 'IN_PROGRESS'].includes(requestItem.status) && h('div', null,
-                h('input', { style: styles.input, value: responseBody, placeholder: '受限 RESPONSE', 'data-testid': 'request-response-body', onChange: (event) => setResponseBody(event.target.value) }),
-                h(Button, {
-                  disabled: busy || !responseBody.trim() || Boolean(target?.currentTaskId), 'data-testid': `respond-${requestItem.id}`,
-                  onClick: () => act('respond-request', { actor: { type: target?.role === 'PROJECT_LEAD' ? 'pl' : 'agent', id: requestItem.toAgentId }, projectId: selected.project.id, requestId: requestItem.id, outcome: 'ANSWER', body: responseBody.trim(), evidenceRefs: [] }),
-                }, target?.currentTaskId ? '接收者忙，保持排队' : '接收者提交 RESPONSE')));
+        h('div', { style: styles.section, 'data-testid': 'human-pending' },
+          h('b', null, `待负责人处理 · ${pendingApprovals.length + submitted.filter((task) => verificationRisk(task).length > 0).length}`),
+          pendingApprovals.map((approval) => h('div', { key: approval.id, style: styles.card },
+            `${approval.kind} · ${approval.status} · ${approval.id}（请到对应项目审批流程处理）`)),
+          submitted.filter((task) => verificationRisk(task).length > 0).map((task) => {
+            const reviewerApproved = reviews.some((item) => item.taskId === task.id && item.resultId === task.resultId && item.reviewerRole === 'REVIEWER' && item.decision === 'APPROVE');
+            const reasons = verificationRisk(task);
+            return h('div', { key: task.id, style: styles.card, 'data-testid': `risk-record-${task.id}` },
+              h('b', null, task.title), h('div', { style: styles.muted }, reasons.join('；')),
+              task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && h('div', { style: styles.muted }, '先完成独立 Reviewer 审核，再由负责人决定风险。'),
+              !readOnly && (task.reviewPolicy !== 'REVIEWER_PL' || reviewerApproved) && h(Button, {
+                disabled: busy || evidenceFor(task).length === 0, 'data-testid': `owner-accept-risk-${task.id}`,
+                onClick: () => {
+                  if (!globalThis.confirm(`Task ${task.id} 的 Host 验证不完整：\n${reasons.join('\n')}\n\n确认由 Human Owner 接受风险并验收？`)) return;
+                  review(task, { type: 'human', id: ownerId }, 'APPROVE', true);
+                },
+              }, 'Owner 接受风险并验收'));
           })),
         submitted.length > 0 && h('div', { style: styles.section, 'data-testid': 'review-queue' },
-          h('b', null, `Review Queue · ${submitted.length}`),
-          !readOnly && h('input', { style: styles.input, value: reviewIssue, placeholder: 'Reject 时填写明确问题', 'data-testid': 'review-issue', onChange: (event) => setReviewIssue(event.target.value) }),
+          h('b', null, `等待 PL / Reviewer 审核 · ${submitted.length}`),
           submitted.map((task) => {
-            const result = selected.results.find((item) => item.id === task.resultId);
-            const resultEvidence = (selected.evidence || []).filter((item) => item.resultId === task.resultId);
-            const verificationIncomplete = result?.outcome !== 'SUCCESS' || resultEvidence.some((item) => item.status === 'FAILED');
+            const verificationIncomplete = verificationRisk(task).length > 0;
             const reviewerApproved = reviews.some((item) => item.taskId === task.id && item.resultId === task.resultId && item.reviewerRole === 'REVIEWER' && item.decision === 'APPROVE');
             const reviewRun = [...reviewRuns].reverse().find((item) => item.taskId === task.id && item.resultId === task.resultId);
             return h('div', { key: task.id, style: styles.card, 'data-testid': 'review-record' },
@@ -635,34 +694,57 @@ window.__ModuleLoader__.load({
                 }, ['STARTING', 'RUNNING'].includes(reviewRun?.status) ? '独立 Reviewer 运行中' : '请求独立 Reviewer 运行')),
               !readOnly && task.reviewPolicy === 'REVIEWER_PL' && !reviewerApproved && !reviewer && h('div', { style: styles.error }, '当前没有可用 Reviewer；请先在 Agents 中更换 Reviewer。'),
               reviewRun && h('div', { style: styles.muted }, `Review Run ${reviewRun.id} · ${reviewRun.status}${reviewRun.error ? ` · ${reviewRun.error.code}: ${reviewRun.error.message}` : ''}`),
+              !readOnly && h('input', { style: styles.input, value: reviewIssues[task.id] || '', placeholder: '退回时填写明确问题', 'data-testid': 'review-issue', 'data-task-id': task.id,
+                onChange: (event) => setReviewIssues((drafts) => ({ ...drafts, [task.id]: event.target.value })) }),
               !readOnly && (task.reviewPolicy !== 'REVIEWER_PL' || reviewerApproved) && h('div', { style: styles.row },
                 !verificationIncomplete && h(Button, { disabled: busy, 'data-testid': `approve-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'APPROVE') }, 'PL 通过'),
-                h(Button, { disabled: busy, 'data-testid': `reject-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'REJECT') }, 'PL 退回')),
-              !readOnly && verificationIncomplete && (task.reviewPolicy !== 'REVIEWER_PL' || reviewerApproved) && h('div', { style: { ...styles.card, borderColor: 'var(--dsw-alias-border-warning)' } },
-                h('b', null, 'Host 验证不完整'),
-                h('div', { style: styles.muted }, '仅 Human Owner 可明确接受 PARTIAL / FAILED evidence 风险并将 Task 验收为 VERIFIED。'),
+                h(Button, { disabled: busy, 'data-testid': `reject-review-${task.id}`, onClick: () => review(task, { type: 'pl', id: lead }, 'REJECT') }, 'PL 退回')));
+          })),
+        h('div', { style: styles.section, 'data-testid': 'request-mailbox' },
+          h('b', null, `待处理协作请求 · ${openRequests.length}`),
+          [...openRequests].reverse().map((requestItem) => {
+            const response = responses.find((item) => item.requestId === requestItem.id);
+            const target = selected.agents.find((agent) => agent.id === requestItem.toAgentId);
+            return h('div', { key: requestItem.id, style: styles.card, 'data-testid': 'request-record' },
+              h('div', { style: { ...styles.row, justifyContent: 'space-between' } }, h('b', null, requestItem.id), h('span', { style: styles.tag }, requestItem.status)),
+              h('div', null, `${requestItem.fromAgentId} → ${requestItem.toAgentId}`),
+              h('div', { style: styles.muted }, requestItem.body),
+              response && h('div', null, h('b', null, `${response.outcome}: `), response.body),
+              !readOnly && ['PENDING', 'IN_PROGRESS'].includes(requestItem.status) && h('div', null,
+                h('input', { style: styles.input, value: responseDrafts[requestItem.id] || '', placeholder: '受限 RESPONSE', 'data-testid': 'request-response-body', 'data-request-id': requestItem.id,
+                  onChange: (event) => setResponseDrafts((drafts) => ({ ...drafts, [requestItem.id]: event.target.value })) }),
                 h(Button, {
-                  disabled: busy,
-                  'data-testid': `owner-accept-risk-${task.id}`,
-                  onClick: () => {
-                    if (!globalThis.confirm(`Task ${task.id} 的 Host 验证不完整。\n\n确认由 Human Owner 接受该风险并验收？`)) return;
-                    review(task, { type: 'human', id: ownerId }, 'APPROVE', true);
+                  disabled: busy || !responseDrafts[requestItem.id]?.trim() || Boolean(target?.currentTaskId), 'data-testid': `respond-${requestItem.id}`,
+                  onClick: async () => {
+                    const ok = await act('respond-request', { actor: { type: target?.role === 'PROJECT_LEAD' ? 'pl' : 'agent', id: requestItem.toAgentId }, projectId: selected.project.id, requestId: requestItem.id, outcome: 'ANSWER', body: responseDrafts[requestItem.id].trim(), evidenceRefs: [] });
+                    if (ok) setResponseDrafts((drafts) => { const next = { ...drafts }; delete next[requestItem.id]; return next; });
                   },
-                }, 'Owner 接受风险并验收')));
+                }, target?.currentTaskId ? '接收者忙，保持排队' : '接收者提交 RESPONSE')));
           })),
         h('div', { style: styles.section, 'data-testid': 'findings' },
-          h('b', null, `Findings · ${findings.length}`),
-          [...findings].reverse().map((finding) => h('div', { key: finding.id, style: styles.card },
+          h('b', null, `未关闭问题 · ${openFindings.length}`),
+          [...openFindings].reverse().map((finding) => h('div', { key: finding.id, style: styles.card },
             h('div', { style: { ...styles.row, justifyContent: 'space-between' } }, h('b', null, `${finding.severity} · ${finding.id}`), h('span', { style: styles.tag }, finding.status)),
             h('div', null, finding.description),
             !readOnly && finding.status !== 'CLOSED' && h(Button, { disabled: busy, onClick: () => act('update-finding', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, findingId: finding.id, status: 'CLOSED' }) }, 'PL 关闭')))),
         h('div', { style: styles.section, 'data-testid': 'plan-checks' },
-          h('b', null, `Plan Checks · ${planChecks.length}`),
-          planChecks.map((plan) => h('div', { key: plan.id, style: styles.card },
+          h('b', null, `待处理计划检查 · ${pendingPlans.length}`),
+          pendingPlans.map((plan) => h('div', { key: plan.id, style: styles.card },
             h('div', null, h('b', null, plan.trigger), ` · ${plan.status}`),
             !readOnly && plan.status === 'PENDING' && h('div', null,
-              h('input', { style: styles.input, value: planNotes, onChange: (event) => setPlanNotes(event.target.value) }),
-              h(Button, { disabled: busy, onClick: () => act('complete-plan-check', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, planCheckId: plan.id, decision: 'KEEP_PLAN', notes: planNotes }) }, 'KEEP PLAN'))))));
+              h('input', { style: styles.input, value: planNotes[plan.id] || '', onChange: (event) => setPlanNotes((drafts) => ({ ...drafts, [plan.id]: event.target.value })) }),
+              h(Button, { disabled: busy, onClick: async () => {
+                const ok = await act('complete-plan-check', { actor: { type: 'pl', id: lead }, projectId: selected.project.id, planCheckId: plan.id, decision: 'KEEP_PLAN', notes: planNotes[plan.id] || 'Current evidence and dependencies remain aligned with the approved Charter.' });
+                if (ok) setPlanNotes((drafts) => { const next = { ...drafts }; delete next[plan.id]; return next; });
+              } }, 'KEEP PLAN'))))),
+        h('details', { style: styles.section, 'data-testid': 'governance-history', onToggle: (event) => setHistoryOpen(event.currentTarget.open) },
+          h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, '历史审批、协作请求、审核与问题'),
+          historyOpen && h('div', null,
+            h('div', { 'data-testid': 'approval-history' }, (selected.approvals || []).filter((item) => item.status !== 'PENDING').map((item) => h('div', { key: item.id, style: styles.card }, `${item.kind} · ${item.status} · ${item.id}`))),
+            requests.filter((item) => !['PENDING', 'IN_PROGRESS'].includes(item.status)).map((item) => h('div', { key: item.id, style: styles.card }, `Request ${item.id} · ${item.status} · ${responses.find((response) => response.requestId === item.id)?.body || item.body}`)),
+            reviews.map((item) => h('div', { key: item.id, style: styles.card }, `Review ${item.id} · ${item.decision} · ${item.taskId}`)),
+            findings.filter((item) => item.status === 'CLOSED').map((item) => h('div', { key: item.id, style: styles.card }, `Finding ${item.id} · ${item.description}`)),
+            planChecks.filter((item) => item.status !== 'PENDING').map((item) => h('div', { key: item.id, style: styles.card }, `Plan Check ${item.id} · ${item.status}`)))));
     }
 
     function ProjectDecisions({ selected, busy, act, readOnly = false }) {
@@ -991,8 +1073,9 @@ window.__ModuleLoader__.load({
               setError(`Project 已创建，但 PL 对话未打开：${e.message}。可在“项目”页重试创建，不会重复创建 Project。`);
             }
           }
+          return true;
         }
-        catch (e) { setError(`${e.code ? `${e.code}: ` : ''}${e.message}`); }
+        catch (e) { setError(`${e.code ? `${e.code}: ` : ''}${e.message}`); return false; }
         finally { setBusy(false); }
       };
 
@@ -1106,14 +1189,14 @@ window.__ModuleLoader__.load({
       else if (activeView === 'tasks') view = h('section', { 'aria-labelledby': 'tasks-heading', 'data-testid': 'view-tasks' },
         h('strong', { id: 'tasks-heading', style: { fontSize: 16 } }, 'Tasks'),
         selected && !createMode && ['ACTIVE', 'STOPPED', 'COMPLETED'].includes(selected.project.status)
-          ? h(TaskBoard, { selected, busy, act, readOnly: selected.project.status !== 'ACTIVE' })
+          ? h(TaskBoard, { key: selected.project.id, selected, busy, act, readOnly: selected.project.status !== 'ACTIVE' })
           : h('div', { style: styles.card }, 'Task DAG 在 Project ACTIVE 后启用。'));
       else if (activeView === 'approvals') view = h('section', { 'aria-labelledby': 'approvals-heading', 'data-testid': 'view-approvals' },
         h('strong', { id: 'approvals-heading', style: { fontSize: 16 } }, 'Approvals & Governance'),
         selected && !createMode && selected.project.status === 'CHARTER_INTERVIEW' && h(Interview, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'CHARTER_PENDING_APPROVAL' && h(CharterApproval, { selected, ownerId, busy, act }),
         selected && !createMode && selected.project.status === 'TEAM_PENDING_APPROVAL' && h(TeamApproval, { selected, runtimes: data.runtimes, ownerId, busy, act }),
-        selected && !createMode && ['ACTIVE', 'COMPLETED', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, { selected, ownerId, busy, act, readOnly: selected.project.status !== 'ACTIVE' }),
+        selected && !createMode && ['ACTIVE', 'COMPLETED', 'STOPPED'].includes(selected.project.status) && h(GovernancePanel, { key: selected.project.id, selected, ownerId, busy, act, readOnly: selected.project.status !== 'ACTIVE' }),
         (!selected || createMode) && h('div', { style: styles.card }, '创建并选择 Project 后显示审批队列。'));
       else view = h(ActivityView, { selected });
 

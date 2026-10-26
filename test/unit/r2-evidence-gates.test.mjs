@@ -430,12 +430,43 @@ test('R2.3: a Reviewer that mutates the workspace is flagged and not approved', 
 // helpers
 // ---------------------------------------------------------------------------
 
+test('O2: a SUCCESS label with missing or FAILED Host Evidence still requires explicit Human risk acceptance', async () => {
+  for (const mode of ['missing-command', 'missing-reference', 'failed-evidence']) {
+    const root = mkdtempSync(join(tmpdir(), `o2-${mode}-`));
+    let fx;
+    try {
+      fx = await fixture(root, { onStart: undefined, output: success('finished', ['src/ok.js']) });
+      const task = createTask(fx, `T-${mode}`, ['src/**'], []);
+      seedResult(fx.store, task, 'SUCCESS', ['EVIDENCE-1'], [{ id: 'EVIDENCE-1', status: 'VERIFIED' }]);
+      const result = fx.store.getResult(fx.store.getTask(task.id).resultId);
+      if (mode === 'missing-command') fx.store.db.prepare('DELETE FROM evidence WHERE id=?').run(`EVIDENCE-COMMAND-${task.id}`);
+      if (mode === 'missing-reference') fx.store.db.prepare('DELETE FROM evidence WHERE id=?').run('EVIDENCE-1');
+      if (mode === 'failed-evidence') fx.store.db.prepare("UPDATE evidence SET status='FAILED' WHERE id='EVIDENCE-1'").run();
+      const project = fx.store.getProject(fx.projectId);
+      assert.throws(() => fx.governance.submitReview({
+        actor: { type: 'pl', id: project.leadAgentId }, operationId: operation(`o2-pl-${mode}`),
+        taskId: task.id, decision: 'APPROVE', issues: [], evidenceRefs: result.evidenceRefs,
+      }), (error) => error.code === 'VERIFICATION_INCOMPLETE', mode);
+      const accepted = fx.governance.submitReview({
+        actor: OWNER, operationId: operation(`o2-human-${mode}`), taskId: task.id,
+        decision: 'APPROVE', issues: [], evidenceRefs: result.evidenceRefs, acceptRisk: true,
+      });
+      assert.equal(accepted.selected.tasks.find((item) => item.id === task.id).status, 'VERIFIED', mode);
+    } finally {
+      await dispose(fx);
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 function seedResult(store, task, outcome, evidenceRefs, evidenceRows) {
   const project = store.getProject(task.projectId);
   const worker = store.listAgents(task.projectId).find((agent) => agent.role === 'WORKER');
   const runId = `RUN-${task.id}`;
   const resultId = `RESULT-${task.id}`;
   const at = new Date().toISOString();
+  const commandId = `EVIDENCE-COMMAND-${task.id}`;
+  const completeRefs = outcome === 'SUCCESS' ? [...evidenceRefs, commandId] : evidenceRefs;
   store.db.prepare(`INSERT INTO task_runs(id, task_id, agent_id, provider_key, attempt, workspace_ref, write_intent,
     status, terminal_kind, terminal_payload_ref, capability_snapshot_json, verification_commands_json, watchdog_state, created_at)
     VALUES(?, ?, ?, ?, 1, ?, 1, 'SUCCEEDED', ?, ?, '{}', '[]', 'TERMINAL', ?)`).run(
@@ -444,11 +475,15 @@ function seedResult(store, task, outcome, evidenceRefs, evidenceRows) {
   store.db.prepare(`INSERT INTO results(id, task_id, run_id, outcome, change_summary, artifacts_json, verified_actions_json,
     test_plan, risks_json, unresolved_json, findings_json, evidence_refs_json, checkpoint_json, request_proposal_json, raw_output_excerpt, created_at)
     VALUES(?, ?, ?, ?, 'seeded', '[]', '[]', '', '[]', '[]', '[]', ?, NULL, NULL, '', ?)`).run(
-    resultId, task.id, runId, outcome, JSON.stringify(evidenceRefs), at,
+    resultId, task.id, runId, outcome, JSON.stringify(completeRefs), at,
   );
   for (const row of evidenceRows) {
     store.db.prepare(`INSERT INTO evidence(id, result_id, kind, ref, status, details_json, created_at)
       VALUES(?, ?, 'FILE', ?, ?, '{}', ?)`).run(row.id, resultId, row.id, row.status, at);
+  }
+  if (outcome === 'SUCCESS') {
+    store.db.prepare(`INSERT INTO evidence(id, result_id, kind, ref, status, details_json, created_at)
+      VALUES(?, ?, 'COMMAND', 'npm test', 'VERIFIED', '{}', ?)`).run(commandId, resultId, at);
   }
   store.db.prepare(`UPDATE tasks SET status='SUBMITTED', result_id=? WHERE id=?`).run(resultId, task.id);
   return resultId;
