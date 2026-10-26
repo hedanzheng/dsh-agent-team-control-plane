@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { classifyWorkspaceChanges, diffWorkspace, snapshotWorkspace, snapshotWorkspaceAsync } from '../../src/host/workspace-diff.js';
 
 function fixture() { return mkdtempSync(join(tmpdir(), 'atcp-o4-scan-')); }
@@ -122,4 +123,32 @@ test('O4: scanner Worker does not inherit incompatible Host CLI flags', () => {
     assert.equal(child.status, 0, child.stderr);
     assert.equal(child.stdout.trim(), '1');
   } finally { cleanup(root); }
+});
+
+test('O4: a file changing during hashing never yields a trusted complete snapshot', async () => {
+  const root = fixture();
+  const file = join(root, 'changing.bin');
+  writeFileSync(file, Buffer.alloc(64 * 1024 * 1024, 0x31));
+  const stop = new Int32Array(new SharedArrayBuffer(4));
+  const writer = new Worker(`
+    const { workerData, parentPort } = require('node:worker_threads');
+    const { openSync, writeSync, closeSync } = require('node:fs');
+    const stop = new Int32Array(workerData.stop);
+    const fd = openSync(workerData.file, 'r+');
+    const byte = Buffer.alloc(1);
+    parentPort.postMessage('ready');
+    while (Atomics.load(stop, 0) === 0) {
+      byte[0] = (byte[0] + 1) & 255;
+      writeSync(fd, byte, 0, 1, 0);
+    }
+    closeSync(fd);
+  `, { eval: true, workerData: { file, stop: stop.buffer }, execArgv: [] });
+  try {
+    await new Promise((resolve, reject) => { writer.once('message', resolve); writer.once('error', reject); });
+    await assert.rejects(snapshotWorkspaceAsync(root), /changed|cannot hash/);
+  } finally {
+    Atomics.store(stop, 0, 1);
+    await writer.terminate();
+    cleanup(root);
+  }
 });
