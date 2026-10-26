@@ -49,8 +49,10 @@ class FakeAdapters {
 }
 
 async function fixture(factory) {
-  const root = mkdtempSync(join(tmpdir(), 'agent-team-phase3-'));
-  const store = new ControlPlaneStore(join(root, 'control-plane.sqlite'));
+  const base = mkdtempSync(join(tmpdir(), 'agent-team-phase3-'));
+  const root = join(base, 'workspace');
+  mkdirSync(root);
+  const store = new ControlPlaneStore(join(base, 'control-plane.sqlite'));
   const plane = new AgentTeamControlPlane(store, scanner());
   let state = await plane.rescanRuntimes({ actor: OWNER, operationId: operation('scan'), cwd: root });
   for (const providerKey of ['harness:deepseek-official', 'subagent:codex']) {
@@ -63,7 +65,7 @@ async function fixture(factory) {
   state = plane.approveTeam({ actor: OWNER, operationId: operation('team'), projectId, expectedVersion: state.selected.project.version });
   const adapters = new FakeAdapters(factory);
   const coordinator = new TaskRunCoordinator({ store, controlPlane: plane, adapters, logger: { error() {}, warn() {} } });
-  return { root, store, plane, coordinator, projectId };
+  return { base, root, store, plane, coordinator, projectId };
 }
 
 function createAndAssign(fx, title = 'Run task') {
@@ -95,7 +97,7 @@ test('Phase 3 persists a real Run/Result/Evidence boundary and never auto-verifi
     mkdirSync(join(fx.root, 'phase3'), { recursive: true });
     writeFileSync(join(fx.root, 'phase3', 'output.txt'), 'PHASE3_OK\n');
     const task = createAndAssign(fx);
-    const state = fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [{ command: 'exit 0' }] });
+    const state = await fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [{ command: 'exit 0' }] });
     const runId = state.selected.taskRuns.at(-1).id;
     const run = await waitTerminal(fx.store, runId);
     assert.equal(run.status, 'SUCCEEDED');
@@ -106,7 +108,7 @@ test('Phase 3 persists a real Run/Result/Evidence boundary and never auto-verifi
     assert.ok(fx.store.listEvidence(fx.projectId).some((item) => item.kind === 'FILE' && item.status === 'VERIFIED' && item.details.sha256));
     assert.ok(fx.store.listEvidence(fx.projectId).some((item) => item.kind === 'COMMAND' && item.status === 'VERIFIED'));
     assert.equal(fx.store.db.prepare('SELECT COUNT(*) AS n FROM workspace_locks').get().n, 0);
-  } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.root, { recursive: true, force: true }); }
+  } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.base, { recursive: true, force: true }); }
 });
 
 test('Phase 3 downgrades SUCCESS to PARTIAL when independent verification commands are absent', async () => {
@@ -114,14 +116,14 @@ test('Phase 3 downgrades SUCCESS to PARTIAL when independent verification comman
   try {
     mkdirSync(join(fx.root, 'phase3'), { recursive: true }); writeFileSync(join(fx.root, 'phase3', 'output.txt'), 'PHASE3_OK\n');
     const task = createAndAssign(fx);
-    const state = fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [] });
+    const state = await fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [] });
     const runId = state.selected.taskRuns.at(-1).id;
     assert.equal((await waitTerminal(fx.store, runId)).status, 'SUCCEEDED');
     const result = fx.store.getResultByRun(runId);
     assert.equal(result.outcome, 'PARTIAL');
     assert.match(result.unresolved.join('\n'), /no verification command was configured/);
     assert.equal(fx.store.getTask(task.id).status, 'SUBMITTED');
-  } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.root, { recursive: true, force: true }); }
+  } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.base, { recursive: true, force: true }); }
 });
 
 test('Phase 3 distinguishes cancellation and parse-unknown without fabricating VERIFIED', async () => {
@@ -130,7 +132,7 @@ test('Phase 3 distinguishes cancellation and parse-unknown without fabricating V
   const fx = await fixture(async () => { await gate; return { stopReason: 'completed', output: [{ type: 'text', text: 'invalid terminal output' }] }; });
   try {
     const task = createAndAssign(fx, 'Cancel task');
-    let state = fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [] });
+    let state = await fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [] });
     const runId = state.selected.taskRuns.at(-1).id;
     for (let i = 0; i < 100 && fx.store.getTaskRun(runId).status !== 'RUNNING'; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
     fx.coordinator.cancelTaskRun({ actor: OWNER, operationId: operation('cancel'), runId });
@@ -138,17 +140,17 @@ test('Phase 3 distinguishes cancellation and parse-unknown without fabricating V
     assert.equal((await waitTerminal(fx.store, runId)).status, 'CANCELLED');
     assert.equal(fx.store.getTask(task.id).status, 'CANCELLED');
     assert.notEqual(fx.store.getTask(task.id).status, 'VERIFIED');
-  } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.root, { recursive: true, force: true }); }
+  } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.base, { recursive: true, force: true }); }
 
   const unknown = await fixture(async () => ({ stopReason: 'completed', output: [{ type: 'text', text: 'invalid terminal output' }] }));
   try {
     const task = createAndAssign(unknown, 'Unknown task');
-    const state = unknown.coordinator.startTaskRun({ actor: { type: 'pl', id: unknown.store.getProject(unknown.projectId).leadAgentId }, operationId: operation('run'), projectId: unknown.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [] });
+    const state = await unknown.coordinator.startTaskRun({ actor: { type: 'pl', id: unknown.store.getProject(unknown.projectId).leadAgentId }, operationId: operation('run'), projectId: unknown.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [] });
     const runId = state.selected.taskRuns.at(-1).id;
     assert.equal((await waitTerminal(unknown.store, runId)).status, 'UNKNOWN');
     assert.equal(unknown.store.getResultByRun(runId).outcome, 'UNKNOWN');
     assert.equal(unknown.store.getTask(task.id).status, 'WAITING');
-  } finally { await unknown.coordinator.close(); unknown.store.close(); rmSync(unknown.root, { recursive: true, force: true }); }
+  } finally { await unknown.coordinator.close(); unknown.store.close(); rmSync(unknown.base, { recursive: true, force: true }); }
 });
 
 test('Phase 3 restart recovery marks active Runs UNKNOWN and does not replay', async () => {
@@ -166,6 +168,5 @@ test('Phase 3 restart recovery marks active Runs UNKNOWN and does not replay', a
     assert.equal(fx.store.getResultByRun(runId).outcome, 'UNKNOWN');
     assert.equal(fx.store.getTask(task.id).status, 'WAITING');
     assert.equal(fx.store.db.prepare('SELECT COUNT(*) AS n FROM workspace_locks').get().n, 0);
-  } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.root, { recursive: true, force: true }); }
+  } finally { await fx.coordinator.close(); fx.store.close(); rmSync(fx.base, { recursive: true, force: true }); }
 });
-

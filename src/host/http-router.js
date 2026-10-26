@@ -225,7 +225,7 @@ export function createControlPlaneHttpHandler({ controlPlane, coordinator, gover
             throw new ControlPlaneError('VERIFICATION_COMMAND_REQUIRED', 'approve and select at least one verification command before starting a Worker Run', 409);
           }
           const verificationCommands = controlPlane.resolveVerificationCommands(project.id, body.verification_command_ids);
-          data = coordinator.startTaskRun({ ...body, actor, verificationCommands, verification_command_ids: undefined });
+          data = await coordinator.startTaskRun({ ...body, actor, verificationCommands, verification_command_ids: undefined });
           break;
         }
         case 'answer-interview': data = controlPlane.answerInterview({ ...body, ...projectScopedActor(controlPlane, body) }); break;

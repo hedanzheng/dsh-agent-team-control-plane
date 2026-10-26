@@ -1,5 +1,5 @@
 import { CHARTER_IMPACT, ControlPlaneError, id, json, now, requireActor, requireString, requireStringArray } from '../shared/contracts.js';
-import { diffWorkspace, snapshotWorkspace } from './workspace-diff.js';
+import { diffWorkspace, snapshotWorkspaceAsync } from './workspace-diff.js';
 
 function actorKey(actor) { return `${actor.type}:${actor.id}`; }
 
@@ -10,7 +10,7 @@ function enumValue(value, field, allowed) {
 }
 
 export class CollaborationGovernance {
-  constructor({ store, controlPlane, adapters = null, logger = console, workspaceSnapshooter = snapshotWorkspace, workspaceDiffer = diffWorkspace }) {
+  constructor({ store, controlPlane, adapters = null, logger = console, workspaceSnapshooter = snapshotWorkspaceAsync, workspaceDiffer = diffWorkspace }) {
     this.store = store;
     this.controlPlane = controlPlane;
     this.adapters = adapters;
@@ -530,9 +530,9 @@ export class CollaborationGovernance {
     // R2.3: capture a baseline so unexpected Reviewer workspace writes can be
     // detected after the Run. This is a post-hoc check and does NOT claim to
     // enforce strong isolation — only to flag and refuse accidental mutation.
-    let baseline = null;
-    try { baseline = this.workspaceSnapshooter(project.workspaceDir); } catch { baseline = null; }
+    let baseline;
     try {
+      baseline = await this.workspaceSnapshooter(project.workspaceDir);
       const started = await this.adapters.startRun({
         runId: reviewRunId, taskId: task.id, agentId: reviewer.id, providerKey: runtime.providerKey,
         projectId: project.id, parentAgent, cwd: project.workspaceDir,
@@ -548,7 +548,7 @@ export class CollaborationGovernance {
         await this.finishReviewRunFailure({ reviewRunId, project, reviewer, status, code: timedOut ? 'REVIEW_TIMEOUT' : 'REVIEW_RUNTIME_TERMINAL', message: `Runtime stop reason ${runtimeResult.stopReason}${runtimeResult.diagnostic ? `: ${runtimeResult.diagnostic}` : ''}` });
         return;
       }
-      const workspaceWrites = this.detectReviewerWrites(project, baseline);
+      const workspaceWrites = await this.detectReviewerWrites(project, baseline);
       if (workspaceWrites) {
         await this.finishReviewRunFailure({ reviewRunId, project, reviewer, status: 'FAILED', code: 'REVIEW_WRITE_DETECTED', message: `Reviewer modified the workspace: ${workspaceWrites.join(', ')}` });
         return;
@@ -589,12 +589,11 @@ export class CollaborationGovernance {
     }
   }
 
-  // R2.3: post-hoc detection of unexpected Reviewer writes. Returns the list of
-  // changed workspace paths, or null when the workspace is unchanged/unreadable.
-  detectReviewerWrites(project, baseline) {
-    if (!baseline) return null;
-    let after;
-    try { after = this.workspaceSnapshooter(project.workspaceDir); } catch { return null; }
+  // R2.3: post-hoc detection of unexpected Reviewer writes. Returns null only
+  // when unchanged; an unreadable workspace is a hard review failure.
+  async detectReviewerWrites(project, baseline) {
+    if (!baseline) throw new ControlPlaneError('REVIEW_BASELINE_MISSING', 'Reviewer workspace baseline is missing', 409);
+    const after = await this.workspaceSnapshooter(project.workspaceDir);
     const diff = this.workspaceDiffer(baseline, after);
     const writes = [...diff.added, ...diff.modified, ...diff.deleted];
     return writes.length > 0 ? writes : null;

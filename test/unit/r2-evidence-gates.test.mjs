@@ -8,7 +8,7 @@ import { ControlPlaneStore } from '../../src/host/store.js';
 import { AgentTeamControlPlane } from '../../src/host/control-plane.js';
 import { CollaborationGovernance } from '../../src/host/governance.js';
 import { TaskRunCoordinator } from '../../src/host/run-coordinator.js';
-import { classifyWorkspaceChanges, diffWorkspace, snapshotWorkspace } from '../../src/host/workspace-diff.js';
+import { classifyWorkspaceChanges, diffWorkspace, snapshotWorkspace, snapshotWorkspaceAsync } from '../../src/host/workspace-diff.js';
 import { RESULT_MARKERS } from '../../src/host/result-parser.js';
 import { verifyArtifacts } from '../../src/host/verification.js';
 
@@ -144,7 +144,7 @@ test('classifyWorkspaceChanges splits forbidden, out-of-scope, and in-scope path
   }
 });
 
-test('workspace snapshot excludes structural directories and SQLite database files', () => {
+test('O4 workspace snapshot audits structural directories and SQLite files instead of ignoring writes', () => {
   const root = mkdtempSync(join(tmpdir(), 'r2-exclude-'));
   try {
     mkdirSync(join(root, 'node_modules'));
@@ -156,9 +156,9 @@ test('workspace snapshot excludes structural directories and SQLite database fil
     writeFileSync(join(root, 'control-plane.sqlite-wal'), 'wal\n');
     const snapshot = snapshotWorkspace(root);
     assert.ok(snapshot.has('src/keep.js'));
-    assert.equal(snapshot.has('node_modules/dep.js'), false);
-    assert.equal(snapshot.has('control-plane.sqlite'), false);
-    assert.equal(snapshot.has('control-plane.sqlite-wal'), false);
+    assert.equal(snapshot.has('node_modules/dep.js'), true);
+    assert.equal(snapshot.has('control-plane.sqlite'), true);
+    assert.equal(snapshot.has('control-plane.sqlite-wal'), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -200,7 +200,7 @@ test('R2.1: an in-scope junction added without being reported still downgrades S
       output: success('finished', ['src/ok.js']),
     });
     const task = createTask(fx, 'T-link', ['src/**'], []);
-    const state = startRun(fx, task);
+    const state = await startRun(fx, task);
     const run = state.selected.taskRuns.at(-1);
     const result = await waitFor(() => fx.store.listResults(fx.projectId).find((item) => item.runId === run.id), 'link escape result');
     assert.equal(result.outcome, 'PARTIAL');
@@ -224,7 +224,7 @@ test('R2.1: Worker that silently writes a forbidden file cannot reach VERIFIED',
       output: success('finished', ['src/ok.js']),
     });
     const task = createTask(fx, 'T-01', ['src/ok.js'], ['src/secret.txt']);
-    startRun(fx, task);
+    await startRun(fx, task);
     await waitFor(() => ['SUBMITTED', 'WAITING'].includes(fx.store.getTask(task.id).status), 'T-01 terminal');
     const result = fx.store.getResult(fx.store.getTask(task.id).resultId);
     assert.equal(result.outcome, 'PARTIAL');
@@ -249,7 +249,7 @@ test('R2.1: Worker that creates an out-of-scope file is flagged PARTIAL', async 
       output: success('finished', ['src/ok.js']),
     });
     const task = createTask(fx, 'T-02', ['src/**'], []);
-    startRun(fx, task);
+    await startRun(fx, task);
     await waitFor(() => ['SUBMITTED', 'WAITING'].includes(fx.store.getTask(task.id).status), 'T-02 terminal');
     const result = fx.store.getResult(fx.store.getTask(task.id).resultId);
     assert.equal(result.outcome, 'PARTIAL');
@@ -429,6 +429,92 @@ test('R2.3: a Reviewer that mutates the workspace is flagged and not approved', 
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+test('O4: failed pre-Run baseline creates neither a Run nor a false success', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'o4-baseline-failure-'));
+  let fx;
+  try {
+    fx = await fixture(root, { output: success('done', []) });
+    const task = createTask(fx, 'baseline failure', ['src/**'], []);
+    fx.coordinator.workspaceSnapshooter = async () => { throw new Error('unreadable workspace entry'); };
+    await assert.rejects(startRun(fx, task), (error) => error.code === 'WORKSPACE_SCAN_FAILED');
+    assert.equal(fx.store.listTaskRuns(fx.projectId).length, 0);
+    assert.equal(fx.store.getTask(task.id).status, 'READY');
+  } finally { await dispose(fx); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('O4: Project stop during an asynchronous baseline cannot launch a stale Run', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'o4-stop-during-scan-'));
+  let fx;
+  try {
+    fx = await fixture(root, { output: success('done', []) });
+    const task = createTask(fx, 'stop during scan', ['src/**'], []);
+    let releaseScan;
+    let scanStarted;
+    const began = new Promise((resolve) => { scanStarted = resolve; });
+    fx.coordinator.workspaceSnapshooter = async () => {
+      scanStarted();
+      return new Promise((resolve) => { releaseScan = () => resolve(new Map()); });
+    };
+    const pending = startRun(fx, task);
+    await began;
+    const project = fx.store.getProject(fx.projectId);
+    fx.plane.stopProject({ actor: OWNER, operationId: operation('stop'), projectId: fx.projectId, expectedVersion: project.version, reason: 'stopped while baseline was pending' });
+    releaseScan();
+    await assert.rejects(pending, (error) => error.code === 'TASK_STATE_CHANGED');
+    assert.equal(fx.store.listTaskRuns(fx.projectId).length, 0);
+  } finally { await dispose(fx); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('O4: failed post-Run scan produces FAILED evidence and never auto-verifies', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'o4-postscan-failure-'));
+  let fx;
+  try {
+    fx = await fixture(root, { output: success('done', []) });
+    const task = createTask(fx, 'postscan failure', ['src/**'], []);
+    let scans = 0;
+    fx.coordinator.workspaceSnapshooter = async (...args) => {
+      if (++scans === 2) throw new Error('file disappeared during re-scan');
+      return snapshotWorkspaceAsync(...args);
+    };
+    const state = await startRun(fx, task);
+    const runId = state.selected.taskRuns.at(-1).id;
+    const result = await waitFor(() => fx.store.getResultByRun(runId), 'postscan failed result');
+    assert.equal(result.outcome, 'PARTIAL');
+    assert.notEqual(fx.store.getTask(task.id).status, 'VERIFIED');
+    assert.ok(fx.store.listEvidence(fx.projectId).some((item) => item.resultId === result.id && item.ref === 'workspace-scan' && item.status === 'FAILED'));
+  } finally { await dispose(fx); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('O4: verification-command-generated out-of-scope file is reported with honest origin', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'o4-command-output-'));
+  let fx;
+  try {
+    fx = await fixture(root, { output: success('done', []) });
+    const task = createTask(fx, 'command output', ['src/**'], []);
+    fx.coordinator.commandVerifier = async () => {
+      writeFileSync(join(root, 'verification-temp.txt'), 'generated by command');
+      return [{ command: 'Write-Output ok', cwd: root, status: 'PASSED', exitCode: 0, stdoutExcerpt: '', stderrExcerpt: '', startedAt: new Date().toISOString(), endedAt: new Date().toISOString() }];
+    };
+    const state = await startRun(fx, task);
+    const runId = state.selected.taskRuns.at(-1).id;
+    const result = await waitFor(() => fx.store.getResultByRun(runId), 'command output result');
+    assert.equal(result.outcome, 'PARTIAL');
+    const evidence = fx.store.listEvidence(fx.projectId).find((item) => item.resultId === result.id && item.ref === 'verification-temp.txt');
+    assert.equal(evidence?.status, 'FAILED');
+    assert.match(evidence.details.origin, /Worker or Host verification command/);
+  } finally { await dispose(fx); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('O4: independent Reviewer scan failure is not treated as an unchanged workspace', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'o4-reviewscan-failure-'));
+  let fx;
+  try {
+    fx = await fixture(root, { output: success('done', []) });
+    fx.governance.workspaceSnapshooter = async () => { throw new Error('unreadable reviewer workspace'); };
+    await assert.rejects(fx.governance.detectReviewerWrites(fx.store.getProject(fx.projectId), new Map()), /unreadable reviewer workspace/);
+  } finally { await dispose(fx); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('O2: a SUCCESS label with missing or FAILED Host Evidence still requires explicit Human risk acceptance', async () => {
   for (const mode of ['missing-command', 'missing-reference', 'failed-evidence']) {

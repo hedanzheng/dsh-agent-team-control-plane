@@ -2,7 +2,7 @@ import { id, json, now, requireActor, requireInteger, requireString, requireStri
 import { buildTaskRunContext } from './context-builder.js';
 import { outputText, parseStructuredResult } from './result-parser.js';
 import { runVerificationCommands, verifyArtifacts } from './verification.js';
-import { classifyWorkspaceChanges, diffWorkspace, snapshotWorkspace } from './workspace-diff.js';
+import { classifyWorkspaceChanges, diffWorkspace, snapshotWorkspaceAsync } from './workspace-diff.js';
 
 const ACTIVE_RUN = new Set(['CREATED', 'STARTING', 'RUNNING']);
 
@@ -39,7 +39,7 @@ function syntheticResult(kind, summary, raw = '') {
 }
 
 export class TaskRunCoordinator {
-  constructor({ store, controlPlane, adapters, governance = null, logger, artifactVerifier = verifyArtifacts, commandVerifier = runVerificationCommands, workspaceSnapshooter = snapshotWorkspace, workspaceDiffer = diffWorkspace, workspaceClassifier = classifyWorkspaceChanges, gracePeriodMs = 30000 }) {
+  constructor({ store, controlPlane, adapters, governance = null, logger, artifactVerifier = verifyArtifacts, commandVerifier = runVerificationCommands, workspaceSnapshooter = snapshotWorkspaceAsync, workspaceDiffer = diffWorkspace, workspaceClassifier = classifyWorkspaceChanges, gracePeriodMs = 30000 }) {
     this.store = store;
     this.controlPlane = controlPlane;
     this.adapters = adapters;
@@ -64,7 +64,7 @@ export class TaskRunCoordinator {
       VALUES(?, ?, ?, ?, ?, ?)`).run(id('RUN-EVENT'), runId, fromStatus, toStatus, json(details), at);
   }
 
-  startTaskRun(input) {
+  async startTaskRun(input) {
     const project = this.controlPlane.requireProject(input.projectId);
     const who = this.controlPlane.assertProjectLead(project, input.actor);
     const task = this.controlPlane.requireTask(project, input.taskId);
@@ -90,15 +90,40 @@ export class TaskRunCoordinator {
     const operationId = this.controlPlane.assertNewOperation(input.operationId);
     const verificationCommands = normalizeCommands(input.verificationCommands);
     const timeoutMs = requireInteger(input.timeoutMs ?? 600000, 'timeoutMs', { min: 5000, max: 1800000 });
-    const attempts = this.store.db.prepare('SELECT COALESCE(MAX(attempt), 0) AS value FROM task_runs WHERE task_id=?').get(task.id).value;
     const runId = id('RUN');
-    const createdAt = now();
     const { prompt } = buildTaskRunContext(this.store, { project, task, agent, verificationCommands });
     // R2.1: capture a trusted workspace baseline BEFORE the write Run starts,
     // so the post-Run diff can attribute actual filesystem changes to the Run.
-    const workspaceBaseline = writeIntent ? this.workspaceSnapshooter(project.workspaceDir) : null;
+    let workspaceBaseline = null;
+    if (writeIntent) {
+      try { workspaceBaseline = await this.workspaceSnapshooter(project.workspaceDir, { signal: input.signal }); }
+      catch (error) {
+        throw new ControlPlaneError('WORKSPACE_SCAN_FAILED', `Run was not started because the workspace baseline failed: ${error instanceof Error ? error.message : String(error)}`, 409);
+      }
+    }
     const workspaceBaselineJson = workspaceBaseline ? json([...workspaceBaseline.entries()]) : null;
+    const createdAt = now();
     this.store.transaction(() => {
+      const currentProject = this.controlPlane.requireProject(project.id);
+      const currentTask = this.controlPlane.requireTask(currentProject, task.id);
+      this.controlPlane.assertProjectLead(currentProject, input.actor);
+      if (currentProject.status !== 'ACTIVE' || currentTask.version !== expectedVersion
+        || currentProject.charterVersion !== project.charterVersion
+        || currentTask.status !== 'READY' || currentTask.assignedAgentId !== agent.id) {
+        throw new ControlPlaneError('TASK_STATE_CHANGED', 'Project or Task changed during workspace baseline scan; reload before starting', 409);
+      }
+      const currentAgent = this.controlPlane.requireProjectAgent(currentProject, agent.id);
+      if (currentAgent.currentTaskId !== task.id || currentAgent.role !== 'WORKER'
+        || currentAgent.providerKey !== agent.providerKey) {
+        throw new ControlPlaneError('AGENT_ASSIGNMENT_INVALID', 'assigned Worker changed during workspace baseline scan', 409);
+      }
+      this.controlPlane.requireUsableAuthorizedRuntime(currentAgent.providerKey);
+      if (!this.controlPlane.dependenciesVerified(currentProject.id, currentTask.dependencies)) {
+        throw new ControlPlaneError('DEPENDENCIES_NOT_VERIFIED', 'Task dependencies changed during workspace baseline scan', 409);
+      }
+      if (this.store.activeTaskRun(task.id)) throw new ControlPlaneError('TASK_RUN_ALREADY_ACTIVE', 'Task already has an active Run', 409);
+      if (this.store.operationExists(operationId)) throw new ControlPlaneError('OPERATION_ALREADY_APPLIED', 'operationId was already applied', 409);
+      const attempts = this.store.db.prepare('SELECT COALESCE(MAX(attempt), 0) AS value FROM task_runs WHERE task_id=?').get(task.id).value;
       if (writeIntent) {
         const locked = this.store.db.prepare('SELECT run_id FROM workspace_locks WHERE workspace_ref=?').get(project.workspaceDir);
         if (locked) throw new ControlPlaneError('WORKSPACE_BUSY', `workspace has active write Run ${locked.run_id}`, 409);
@@ -253,10 +278,11 @@ export class TaskRunCoordinator {
   // R2.1: re-scan the workspace after a write Run and classify the actual
   // change set (added/modified/deleted) against the Task scope. Forbidden and
   // out-of-scope paths become FAILED evidence; they are never silently accepted.
-  auditWorkspace(spec, run) {
-    if (!run.writeIntent || !run.workspaceBaseline) return null;
+  async auditWorkspace(spec, run) {
+    if (!run.writeIntent) return null;
+    if (!run.workspaceBaseline) throw new ControlPlaneError('WORKSPACE_BASELINE_MISSING', 'write Run has no trusted workspace baseline', 409);
     const before = new Map(run.workspaceBaseline);
-    const after = this.workspaceSnapshooter(spec.project.workspaceDir);
+    const after = await this.workspaceSnapshooter(spec.project.workspaceDir);
     const diff = this.workspaceDiffer(before, after);
     const classification = this.workspaceClassifier(spec.project.workspaceDir, diff, spec.task.scope);
     const changeKind = (path) => (diff.added.includes(path) ? 'added' : diff.modified.includes(path) ? 'modified' : 'deleted');
@@ -264,8 +290,8 @@ export class TaskRunCoordinator {
     const linkChanges = changedPaths.filter((path) => before.get(path)?.symlink || after.get(path)?.symlink);
     const alreadyFailed = new Set([...classification.forbidden, ...classification.outOfScope]);
     const scopeEvidence = [
-      ...classification.forbidden.map((path) => ({ kind: 'FILE', ref: path, status: 'FAILED', details: { reason: 'forbidden scope modification', change: changeKind(path), scope: 'forbidden' } })),
-      ...classification.outOfScope.map((path) => ({ kind: 'FILE', ref: path, status: 'FAILED', details: { reason: 'out-of-scope modification', change: changeKind(path), scope: 'out-of-scope' } })),
+      ...classification.forbidden.map((path) => ({ kind: 'FILE', ref: path, status: 'FAILED', details: { reason: 'forbidden scope modification', change: changeKind(path), scope: 'forbidden', origin: 'Worker or Host verification command; not separately attributable' } })),
+      ...classification.outOfScope.map((path) => ({ kind: 'FILE', ref: path, status: 'FAILED', details: { reason: 'out-of-scope modification', change: changeKind(path), scope: 'out-of-scope', origin: 'Worker or Host verification command; not separately attributable' } })),
       ...linkChanges.filter((path) => !alreadyFailed.has(path)).map((path) => ({
         kind: 'FILE', ref: path, status: 'FAILED',
         details: { reason: 'symbolic link or junction modification', change: changeKind(path), scope: 'unsafe-link' },
@@ -281,13 +307,18 @@ export class TaskRunCoordinator {
     const resultId = id('RESULT');
     const at = now();
     // R2.1: audit the ACTUAL workspace change set against Task scope.
-    const workspaceAudit = this.auditWorkspace(spec, run);
-    const scopeEvidence = workspaceAudit?.scopeEvidence ?? [];
+    let workspaceAudit = null;
+    let scanFailure = null;
+    try { workspaceAudit = await this.auditWorkspace(spec, run); }
+    catch (error) { scanFailure = error instanceof Error ? error.message : String(error); }
+    const scopeEvidence = scanFailure
+      ? [{ kind: 'FILE', ref: 'workspace-scan', status: 'FAILED', details: { reason: 'workspace audit failed', error: scanFailure } }]
+      : workspaceAudit?.scopeEvidence ?? [];
     let outcome = parsed.terminalKind;
     if (parsed.terminalKind === 'SUCCESS') {
       const commandsPass = verificationRuns.length > 0 && verificationRuns.every((item) => item.status === 'PASSED');
       const filesPass = artifactEvidence.every((item) => item.status === 'VERIFIED');
-      const scopePass = scopeEvidence.length === 0;
+      const scopePass = scopeEvidence.length === 0 && !scanFailure;
       if (!commandsPass || !filesPass || !scopePass) outcome = 'PARTIAL';
     }
     const verificationUnresolved = [];
@@ -300,6 +331,7 @@ export class TaskRunCoordinator {
     for (const item of scopeEvidence) {
       verificationUnresolved.push(`Workspace scope violation: ${item.details?.change ?? 'changed'} ${item.ref} (${item.details?.reason})`);
     }
+    if (scanFailure) verificationUnresolved.push(`Host workspace audit unavailable: ${scanFailure}`);
     for (const item of verificationRuns.filter((entry) => entry.status !== 'PASSED')) {
       const diagnostic = item.stderrExcerpt || item.stdoutExcerpt || item.status;
       verificationUnresolved.push(`Host command verification ${item.status.toLowerCase()} (exit ${item.exitCode ?? 'unknown'}): ${item.command}: ${diagnostic}`.slice(0, 4000));
@@ -354,7 +386,7 @@ export class TaskRunCoordinator {
         runStatus, parsed.terminalKind, resultId, workspaceAudit ? json({
           added: workspaceAudit.diff.added, modified: workspaceAudit.diff.modified,
           deleted: workspaceAudit.diff.deleted, scope: workspaceAudit.classification,
-        }) : null, error?.code ?? null, error?.message ?? null, at, at, spec.runId,
+        }) : scanFailure ? json({ scanError: scanFailure }) : null, error?.code ?? null, error?.message ?? null, at, at, spec.runId,
       );
       this.addRunEvent(spec.runId, run.status, runStatus, { resultId, outcome, stopReason: runtimeResult.stopReason }, at);
       const waitingReason = taskStatus === 'WAITING' ? parsed.changeSummary : null;

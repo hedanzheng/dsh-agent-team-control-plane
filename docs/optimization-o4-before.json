@@ -1,0 +1,83 @@
+{
+  "phase": "O4-A before",
+  "measuredAt": "2026-10-26T10:33:13.374Z",
+  "node": "v24.15.0",
+  "platform": "win32/x64",
+  "gcExposed": true,
+  "scales": [
+    {
+      "files": 100,
+      "contentBytes": 25600,
+      "legacyPhases": {
+        "readdirMs": 0.26,
+        "lstatMs": 1.799,
+        "readHashMs": 5.506,
+        "entries": 102,
+        "files": 100,
+        "bytes": 25600,
+        "totalMs": 8.839
+      },
+      "realScanner": {
+        "medianMs": 8.79,
+        "maxEventLoopLagMs": 8.709,
+        "medianRssBytes": 56348672,
+        "baselineJsonBytes": 13491
+      },
+      "asyncScanner": null,
+      "sqliteBaselineWriteMedianMs": 1.722
+    },
+    {
+      "files": 1000,
+      "contentBytes": 256000,
+      "legacyPhases": {
+        "readdirMs": 0.928,
+        "lstatMs": 13.787,
+        "readHashMs": 45.13,
+        "entries": 1011,
+        "files": 1000,
+        "bytes": 256000,
+        "totalMs": 64.781
+      },
+      "realScanner": {
+        "medianMs": 74.221,
+        "maxEventLoopLagMs": 69.56,
+        "medianRssBytes": 59265024,
+        "baselineJsonBytes": 135891
+      },
+      "asyncScanner": null,
+      "sqliteBaselineWriteMedianMs": 1.916
+    },
+    {
+      "files": 10000,
+      "contentBytes": 2560000,
+      "legacyPhases": {
+        "readdirMs": 10.981,
+        "lstatMs": 189.027,
+        "readHashMs": 551.236,
+        "entries": 10101,
+        "files": 10000,
+        "bytes": 2560000,
+        "totalMs": 808.762
+      },
+      "realScanner": {
+        "medianMs": 882.32,
+        "maxEventLoopLagMs": 892.496,
+        "medianRssBytes": 95625216,
+        "baselineJsonBytes": 1377891
+      },
+      "asyncScanner": null,
+      "sqliteBaselineWriteMedianMs": 5.373
+    }
+  ],
+  "largeFile": {
+    "sizeBytes": 67108864,
+    "sync": {
+      "ms": 42.916,
+      "maxEventLoopLagMs": 38.024,
+      "peakRssBytes": 202768384,
+      "entries": 1,
+      "baselineJsonBytes": 133
+    },
+    "async": null
+  }
+}

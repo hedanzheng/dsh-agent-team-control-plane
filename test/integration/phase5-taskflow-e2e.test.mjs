@@ -88,12 +88,12 @@ function createTask(fx, title, dependencies, controlLevel, reviewPolicy, allowed
   return state.selected.tasks.at(-1);
 }
 
-function assignAndStart(fx, task) {
+async function assignAndStart(fx, task) {
   const project = fx.store.getProject(fx.projectId);
   const worker = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'WORKER' && agent.status !== 'REPLACED');
   let state = fx.plane.assignTask({ actor: { type: 'pl', id: project.leadAgentId }, operationId: operation('assign'), projectId: project.id, taskId: task.id, expectedVersion: task.version, agentId: worker.id });
   task = state.selected.tasks.find((item) => item.id === task.id);
-  state = startAssigned(fx, task);
+  state = await startAssigned(fx, task);
   return state.selected.taskRuns.at(-1).id;
 }
 
@@ -127,19 +127,19 @@ test('TaskFlow §13 DAG completes NEEDS_INPUT handoff, AUTO/PL/REVIEWER_PL revie
     assert.equal(fx.store.getTask(t02.id).status, 'PENDING');
     assert.equal(fx.store.getTask(t04.id).status, 'PENDING');
 
-    assignAndStart(fx, t01);
+    await assignAndStart(fx, t01);
     const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'T-01 request');
     assert.equal(fx.store.getTask(t01.id).status, 'WAITING');
     fx.governance.respondRequest({ actor: { type: 'agent', id: reviewer.id }, operationId: operation('response'), requestId: request.id, outcome: 'ANSWER', body: 'Use the bounded TODO, DOING, DONE enum.', evidenceRefs: [] });
     assert.equal(fx.store.getTask(t01.id).status, 'READY');
-    startAssigned(fx, fx.store.getTask(t01.id));
+    await startAssigned(fx, fx.store.getTask(t01.id));
     await waitFor(() => fx.store.getTask(t01.id).status === 'SUBMITTED', 'T-01 submitted');
     assert.match(fx.adapters.prompts[1], /TODO, DOING, DONE/);
     approvePL(fx, t01.id);
     assert.equal(fx.store.getTask(t02.id).status, 'READY');
     assert.equal(fx.store.getTask(t03.id).status, 'READY');
 
-    assignAndStart(fx, fx.store.getTask(t02.id));
+    await assignAndStart(fx, fx.store.getTask(t02.id));
     await waitFor(() => fx.store.getTask(t02.id).status === 'SUBMITTED', 'T-02 submitted');
     approvePL(fx, t02.id);
     const findingState = fx.governance.reportFinding({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('finding'), projectId: fx.projectId, discoveredInTaskId: t02.id, description: 'Review found missing invalid-status coverage.', evidenceRefs: [], severity: 'HIGH' });
@@ -147,7 +147,7 @@ test('TaskFlow §13 DAG completes NEEDS_INPUT handoff, AUTO/PL/REVIEWER_PL revie
     const t05 = createTask(fx, 'T-05 Fix review finding', [t02.id], 'IMPORTANT', 'PL', ['src/task-api.js', 'test/taskflow.test.mjs']);
     fx.governance.updateFinding({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('link-finding'), findingId: finding.id, status: 'LINKED_TO_TASK', linkedFixTaskId: t05.id });
 
-    assignAndStart(fx, fx.store.getTask(t03.id));
+    await assignAndStart(fx, fx.store.getTask(t03.id));
     await waitFor(() => !['READY', 'RUNNING'].includes(fx.store.getTask(t03.id).status), 'T-03 terminal state');
     assert.equal(fx.store.getTask(t03.id).status, 'VERIFIED', JSON.stringify({
       result: fx.store.getResult(fx.store.getTask(t03.id).resultId),
@@ -157,14 +157,14 @@ test('TaskFlow §13 DAG completes NEEDS_INPUT handoff, AUTO/PL/REVIEWER_PL revie
     assert.equal(fx.store.listReviews(fx.projectId).find((review) => review.taskId === t03.id).reviewerRole, 'AUTO');
     assert.equal(fx.store.getTask(t04.id).status, 'READY');
 
-    assignAndStart(fx, fx.store.getTask(t04.id));
+    await assignAndStart(fx, fx.store.getTask(t04.id));
     await waitFor(() => fx.store.getTask(t04.id).status === 'SUBMITTED', 'T-04 submitted');
     let task = fx.store.getTask(t04.id);
     let result = fx.store.getResult(task.resultId);
     fx.governance.submitReview({ actor: { type: 'agent', id: reviewer.id }, operationId: operation('reviewer'), taskId: task.id, decision: 'APPROVE', issues: [], evidenceRefs: result.evidenceRefs });
     approvePL(fx, t04.id);
 
-    assignAndStart(fx, fx.store.getTask(t05.id));
+    await assignAndStart(fx, fx.store.getTask(t05.id));
     await waitFor(() => fx.store.getTask(t05.id).status === 'SUBMITTED', 'T-05 submitted');
     approvePL(fx, t05.id);
     fx.governance.updateFinding({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('close-finding'), findingId: finding.id, status: 'CLOSED' });
@@ -239,7 +239,7 @@ test('stopping a WAITING Task rejects its open Request and resume never revives 
     const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER');
     fx.adapters.outputs[0] = needsInput(reviewer.id);
     const task = createTask(fx, 'Wait for an external decision', [], 'IMPORTANT', 'PL', ['src/contract.js']);
-    assignAndStart(fx, task);
+    await assignAndStart(fx, task);
     const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'open Request before stop');
     await waitFor(() => fx.store.getTask(task.id).status === 'WAITING', 'source Task waiting');
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { ControlPlaneStore } from '../../src/host/store.js';
 import { AgentTeamControlPlane } from '../../src/host/control-plane.js';
@@ -50,8 +50,10 @@ class SequenceAdapters {
 }
 
 async function fixture(outputs) {
-  const root = mkdtempSync(join(tmpdir(), 'agent-team-phase4-'));
-  const store = new ControlPlaneStore(join(root, 'control-plane.sqlite'));
+  const base = mkdtempSync(join(tmpdir(), 'agent-team-phase4-'));
+  const root = join(base, 'workspace');
+  mkdirSync(root);
+  const store = new ControlPlaneStore(join(base, 'control-plane.sqlite'));
   const plane = new AgentTeamControlPlane(store, scanner());
   let state = await plane.rescanRuntimes({ actor: OWNER, operationId: operation('scan'), cwd: root });
   for (const providerKey of ['harness:deepseek-official', 'subagent:codex']) state = plane.authorizeRuntime({ actor: OWNER, operationId: operation('auth'), providerKey, authorized: true });
@@ -67,7 +69,7 @@ async function fixture(outputs) {
     artifactVerifier: async (_workspace, _task, artifacts) => artifacts.map((ref) => ({ kind: 'FILE', ref, status: 'VERIFIED', details: { sha256: 'test' } })),
     commandVerifier: async (workspace, commands) => commands.map((item) => ({ command: item.command, cwd: workspace, exitCode: 0, status: 'PASSED', stdoutExcerpt: '', stderrExcerpt: '', startedAt: new Date().toISOString(), endedAt: new Date().toISOString() })),
   });
-  return { root, store, plane, adapters, governance, coordinator, projectId };
+  return { base, root, store, plane, adapters, governance, coordinator, projectId };
 }
 
 function createAssigned(fx, title, controlLevel = 'IMPORTANT', reviewPolicy = 'PL') {
@@ -79,8 +81,8 @@ function createAssigned(fx, title, controlLevel = 'IMPORTANT', reviewPolicy = 'P
   return state.selected.tasks.find((item) => item.id === task.id);
 }
 
-function start(fx, task) {
-  const state = fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [{ command: 'exit 0' }] });
+async function start(fx, task) {
+  const state = await fx.coordinator.startTaskRun({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('run'), projectId: fx.projectId, taskId: task.id, expectedVersion: task.version, verificationCommands: [{ command: 'exit 0' }] });
   return state.selected.taskRuns.at(-1).id;
 }
 
@@ -89,7 +91,7 @@ async function waitFor(predicate, message = 'condition') {
   throw new Error(`Timed out waiting for ${message}`);
 }
 
-async function close(fx) { await fx.coordinator.close(); fx.store.close(); rmSync(fx.root, { recursive: true, force: true }); }
+async function close(fx) { await fx.coordinator.close(); fx.store.close(); rmSync(fx.base, { recursive: true, force: true }); }
 
 test('NEEDS_INPUT creates a bounded mailbox Request; Response rebuilds context; reject/rework/approve preserves history', async () => {
   const fx = await fixture([]);
@@ -97,7 +99,7 @@ test('NEEDS_INPUT creates a bounded mailbox Request; Response rebuilds context; 
     const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER');
     fx.adapters.outputs.push(needsInput(reviewer.id), success(['Found a non-blocking edge case']), success(['Found a non-blocking edge case']));
     let task = createAssigned(fx, 'Request and review');
-    start(fx, task);
+    await start(fx, task);
     const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'request creation');
     task = fx.store.getTask(task.id);
     assert.equal(task.status, 'WAITING');
@@ -111,7 +113,7 @@ test('NEEDS_INPUT creates a bounded mailbox Request; Response rebuilds context; 
     let state = fx.governance.respondRequest({ actor: { type: 'agent', id: reviewer.id }, operationId: operation('response'), requestId: request.id, outcome: 'ANSWER', body: 'Use the approved v1 interface contract.', evidenceRefs: ['DECISION-TEST'] });
     task = state.selected.tasks.find((item) => item.id === task.id);
     assert.equal(task.status, 'READY');
-    start(fx, task);
+    await start(fx, task);
     await waitFor(() => fx.store.getTask(task.id).status === 'SUBMITTED', 'second Result');
     assert.match(fx.adapters.prompts[1], /Use the approved v1 interface contract/);
     assert.equal(fx.store.listFindings(fx.projectId).length, 1);
@@ -121,7 +123,7 @@ test('NEEDS_INPUT creates a bounded mailbox Request; Response rebuilds context; 
     task = state.selected.tasks.find((item) => item.id === task.id);
     assert.equal(task.status, 'READY');
     const rejectedResultId = task.resultId;
-    start(fx, task);
+    await start(fx, task);
     await waitFor(() => fx.store.getTask(task.id).status === 'SUBMITTED' && fx.store.getTask(task.id).resultId !== rejectedResultId, 'revision Result');
     assert.match(fx.adapters.prompts[2], /Add the missing boundary assertion/);
     task = fx.store.getTask(task.id); result = fx.store.getResult(task.resultId);
@@ -138,7 +140,7 @@ test('ROUTINE auto-verifies only with Host evidence and triggers the configured 
   try {
     fx.store.db.prepare('UPDATE projects SET replan_every_n=1 WHERE id=?').run(fx.projectId);
     const task = createAssigned(fx, 'Routine auto', 'ROUTINE', 'AUTO');
-    start(fx, task);
+    await start(fx, task);
     await waitFor(() => fx.store.getTask(task.id).status === 'VERIFIED', 'automatic verification');
     const state = fx.store.snapshot(fx.projectId);
     assert.equal(state.selected.reviews.at(-1).reviewerRole, 'AUTO');
@@ -155,7 +157,7 @@ test('CRITICAL review requires independent Reviewer approval before PL and forbi
     let task = createAssigned(fx, 'Critical review', 'CRITICAL', 'REVIEWER_PL');
     const worker = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'WORKER');
     const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER');
-    start(fx, task);
+    await start(fx, task);
     await waitFor(() => fx.store.getTask(task.id).status === 'SUBMITTED', 'critical submission');
     task = fx.store.getTask(task.id); const result = fx.store.getResult(task.resultId);
     assert.throws(() => fx.governance.submitReview({ actor: { type: 'pl', id: fx.store.getProject(fx.projectId).leadAgentId }, operationId: operation('early-pl'), taskId: task.id, decision: 'APPROVE', issues: [], evidenceRefs: [result.evidenceRefs[0]] }), (error) => error.code === 'REVIEWER_APPROVAL_REQUIRED');
@@ -172,7 +174,7 @@ test('PL dispatches an independent Reviewer Run, replaced identities are rejecte
   let runtimeGovernance;
   try {
     let task = createAssigned(fx, 'Automated critical review', 'CRITICAL', 'REVIEWER_PL');
-    start(fx, task);
+    await start(fx, task);
     await waitFor(() => fx.store.getTask(task.id).status === 'SUBMITTED', 'critical submission');
     task = fx.store.getTask(task.id);
     const result = fx.store.getResult(task.resultId);
@@ -223,7 +225,7 @@ test('Request timeout returns a bounded timeout Response and never auto-reissues
     const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER');
     fx.adapters.outputs.push(needsInput(reviewer.id));
     const task = createAssigned(fx, 'Timeout request');
-    start(fx, task);
+    await start(fx, task);
     const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'timeout request');
     fx.store.db.prepare("UPDATE requests SET deadline_at='2000-01-01T00:00:00.000Z' WHERE id=?").run(request.id);
     assert.equal(fx.governance.timeoutExpiredRequests(), 1);
@@ -239,7 +241,7 @@ test('Host restart recovery marks an active independent Review Run UNKNOWN and r
   const fx = await fixture([success()]);
   try {
     const task = createAssigned(fx, 'Interrupted review', 'CRITICAL', 'REVIEWER_PL');
-    start(fx, task);
+    await start(fx, task);
     await waitFor(() => fx.store.getTask(task.id).status === 'SUBMITTED', 'review submission');
     const submitted = fx.store.getTask(task.id);
     const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER' && agent.status === 'IDLE');
@@ -262,7 +264,7 @@ test('Host restart recovery marks an active collaboration Request Run UNKNOWN wi
     const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER');
     fx.adapters.outputs.push(needsInput(reviewer.id, 'Recover this interrupted request'));
     const task = createAssigned(fx, 'Interrupted request');
-    start(fx, task);
+    await start(fx, task);
     const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'request creation');
     const at = new Date().toISOString();
     fx.store.db.prepare(`INSERT INTO request_runs(id, request_id, agent_id, provider_key, runtime_session_ref,
@@ -302,13 +304,13 @@ test('A Task cannot exceed three active collaboration Requests across continuati
     fx.adapters.outputs.push(needsInput(reviewer.id, 'question 1'), needsInput(reviewer.id, 'question 2'), needsInput(reviewer.id, 'question 3'), needsInput(reviewer.id, 'question 4'));
     let task = createAssigned(fx, 'Request budget');
     for (let index = 1; index <= 3; index += 1) {
-      start(fx, task);
+      await start(fx, task);
       const request = await waitFor(() => fx.store.listRequests(fx.projectId).find((item) => item.body === `question ${index}`), `request ${index}`);
       fx.governance.respondRequest({ actor: { type: 'agent', id: reviewer.id }, operationId: operation(`answer-${index}`), requestId: request.id, outcome: 'ANSWER', body: `answer ${index}`, evidenceRefs: [] });
       task = fx.store.getTask(task.id);
       assert.equal(task.status, 'READY');
     }
-    start(fx, task);
+    await start(fx, task);
     await waitFor(() => fx.store.getTask(task.id).waiting?.reason?.startsWith('Request rejected:'), 'budget rejection');
     assert.equal(fx.store.listRequests(fx.projectId).length, 3);
     assert.match(fx.store.getTask(task.id).waiting.reason, /3-request budget/);
@@ -325,7 +327,7 @@ test('IDLE external recipient answers a Request through its own bounded one-shot
     fx.coordinator.governance = runtimeGovernance;
     fx.adapters.outputs.push(needsInput(reviewer.id, 'Give a bounded direct answer'), responseOutput('Direct recipient answer; no PL relay.'));
     const task = createAssigned(fx, 'Runtime response');
-    start(fx, task);
+    await start(fx, task);
     await waitFor(() => fx.store.listResponses(fx.projectId).length === 1, 'runtime response');
     const state = fx.store.snapshot(fx.projectId);
     assert.equal(state.selected.requestRuns.at(-1).status, 'SUCCEEDED');
@@ -346,7 +348,7 @@ test('busy recipient keeps a Request queued and dispatches only after becoming I
     fx.coordinator.governance = runtimeGovernance;
     fx.adapters.outputs.push(needsInput(reviewer.id, 'Answer after the current Task'), responseOutput('Queued recipient answer.'));
     const task = createAssigned(fx, 'Queued runtime response');
-    start(fx, task);
+    await start(fx, task);
     const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'queued Request');
     assert.equal(request.status, 'PENDING');
     assert.equal(fx.store.listRequestRuns(fx.projectId).length, 0);

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
-import { lstatSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { pathMatchesScope } from './verification.js';
 
 // R2.1: the Task Run must be checked against the ACTUAL set of workspace
@@ -10,75 +11,132 @@ import { pathMatchesScope } from './verification.js';
 // Task scope (allowed / forbidden) so out-of-scope or forbidden writes can be
 // surfaced as FAILED evidence instead of being silently accepted.
 
-// Directories that are structural and never part of a Task's deliverable set.
-const EXCLUDED_DIRECTORIES = new Set(['.git', 'node_modules', '.workbuddy', '__pycache__']);
+// O4-A: every entry in the workspace is audited. Structural directories and
+// SQLite files are not exempt: a Worker could otherwise modify them without
+// producing an out-of-scope/forbidden change record.
+const HASH_BUFFER = Buffer.allocUnsafe(1024 * 1024);
 
-function sha256File(fullPath) {
-  const hash = createHash('sha256');
-  hash.update(readFileSync(fullPath));
-  return hash.digest('hex');
+export class WorkspaceScanError extends Error {
+  constructor(message, cause) {
+    super(message, { cause });
+    this.name = 'WorkspaceScanError';
+    this.code = 'WORKSPACE_SCAN_FAILED';
+  }
 }
 
-function recordFor(fullPath, info) {
-  return { size: info.size, mtimeMs: Math.floor(info.mtimeMs), sha256: sha256File(fullPath) };
+function inside(root, target) {
+  const rel = relative(root, target);
+  return rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+function sha256File(fullPath, expected, root) {
+  const canonical = realpathSync.native(fullPath);
+  if (!inside(root, canonical)) throw new WorkspaceScanError(`workspace entry resolves outside root: ${fullPath}`);
+  const fd = openSync(fullPath, 'r');
+  const hash = createHash('sha256');
+  try {
+    const initial = fstatSync(fd);
+    if (initial.dev !== expected.dev || initial.ino !== expected.ino || initial.size !== expected.size
+      || initial.mtimeMs !== expected.mtimeMs) {
+      throw new WorkspaceScanError(`workspace entry changed before hashing: ${fullPath}`);
+    }
+    let total = 0;
+    for (;;) {
+      const length = readSync(fd, HASH_BUFFER, 0, HASH_BUFFER.length, null);
+      if (length === 0) break;
+      hash.update(HASH_BUFFER.subarray(0, length));
+      total += length;
+    }
+    const final = fstatSync(fd);
+    if (total !== initial.size || final.size !== initial.size || final.mtimeMs !== initial.mtimeMs
+      || final.ctimeMs !== initial.ctimeMs) {
+      throw new WorkspaceScanError(`workspace entry changed during hashing: ${fullPath}`);
+    }
+    return hash.digest('hex');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function recordFor(fullPath, info, root) {
+  return { size: info.size, mtimeMs: Math.floor(info.mtimeMs), sha256: sha256File(fullPath, info, root) };
 }
 
 function walk(baseDir, dir, files) {
   let entries;
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
+  try { entries = readdirSync(dir); }
+  catch (error) { throw new WorkspaceScanError(`cannot list workspace directory: ${dir}`, error); }
   for (const name of entries) {
-    if (EXCLUDED_DIRECTORIES.has(name)) continue;
-    // Exclude the control-plane SQLite database (and its WAL/SHM sidecars):
-    // it mutates on every state change and is never a Task deliverable.
-    if (name.endsWith('.sqlite') || name.endsWith('.sqlite-wal') || name.endsWith('.sqlite-shm') || name.endsWith('.sqlite-journal')) continue;
     const fullPath = join(dir, name);
     let info;
-    try {
-      info = lstatSync(fullPath);
-    } catch {
-      continue;
-    }
+    try { info = lstatSync(fullPath); }
+    catch (error) { throw new WorkspaceScanError(`cannot inspect workspace entry: ${fullPath}`, error); }
     if (info.isSymbolicLink()) {
       // Symbolic links / junctions cannot be hashed as regular files and are a
       // known escape vector. Record them explicitly so a diff can flag them.
       const relativePath = relative(baseDir, fullPath).replaceAll('\\', '/');
-      files.set(relativePath, { symlink: true, target: readlinkSafe(fullPath) });
+      try { files.set(relativePath, { symlink: true, target: readlinkSync(fullPath) }); }
+      catch (error) { throw new WorkspaceScanError(`cannot inspect workspace link: ${fullPath}`, error); }
       continue;
     }
     if (info.isDirectory()) {
       walk(baseDir, fullPath, files);
       continue;
     }
-    if (!info.isFile()) continue;
+    if (!info.isFile()) throw new WorkspaceScanError(`unsupported workspace entry type: ${fullPath}`);
     const relativePath = relative(baseDir, fullPath).replaceAll('\\', '/');
-    try {
-      files.set(relativePath, recordFor(fullPath, info));
-    } catch {
-      // Unreadable file (permissions, transient): keep a size/mtime-only entry
-      // so it is still visible to the diff.
-      files.set(relativePath, { size: info.size, mtimeMs: Math.floor(info.mtimeMs), sha256: null });
-    }
-  }
-}
-
-function readlinkSafe(fullPath) {
-  try {
-    return readlinkSync(fullPath);
-  } catch {
-    return null;
+    try { files.set(relativePath, recordFor(fullPath, info, baseDir)); }
+    catch (error) { throw error instanceof WorkspaceScanError ? error : new WorkspaceScanError(`cannot hash workspace file: ${fullPath}`, error); }
   }
 }
 
 // Returns a Map<workspaceRelativePath, { size, mtimeMs, sha256 } | { symlink, target }>.
 export function snapshotWorkspace(workspace) {
-  const root = resolve(workspace);
+  let root;
+  try {
+    root = realpathSync.native(resolve(workspace));
+    if (!statSync(root).isDirectory()) throw new Error('workspace root is not a directory');
+  } catch (error) {
+    throw new WorkspaceScanError(`cannot resolve workspace root: ${workspace}`, error);
+  }
   const files = new Map();
   walk(root, root, files);
   return files;
+}
+
+// One short-lived Worker per scan: filesystem traversal and hashing never
+// block the Host event loop. Abort and deadline both terminate the Worker;
+// errors reject instead of returning a partial snapshot.
+export function snapshotWorkspaceAsync(workspace, { signal, timeoutMs = 180000 } = {}) {
+  if (signal?.aborted) return Promise.reject(Object.assign(new Error('workspace scan aborted'), { name: 'AbortError', code: 'ABORT_ERR' }));
+  return new Promise((resolveSnapshot, rejectSnapshot) => {
+    const worker = new Worker(new URL('./workspace-diff-worker.js', import.meta.url), { workerData: { workspace } });
+    let settled = false;
+    const finish = (error, entries) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      if (error) rejectSnapshot(error);
+      else resolveSnapshot(new Map(entries));
+    };
+    const abort = () => {
+      worker.terminate().catch(() => {});
+      finish(Object.assign(new Error('workspace scan aborted'), { name: 'AbortError', code: 'ABORT_ERR' }));
+    };
+    const timer = setTimeout(() => {
+      worker.terminate().catch(() => {});
+      finish(new WorkspaceScanError(`workspace scan exceeded ${timeoutMs} ms`));
+    }, timeoutMs);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    worker.once('message', (message) => {
+      if (message.ok) finish(null, message.entries);
+      else finish(new WorkspaceScanError(message.message || 'workspace scan failed'));
+    });
+    worker.once('error', (error) => finish(new WorkspaceScanError('workspace scan Worker failed', error)));
+    worker.once('exit', (code) => { if (!settled) finish(new WorkspaceScanError(`workspace scan Worker exited before result (code ${code})`)); });
+  });
 }
 
 // Diffs two snapshots produced by snapshotWorkspace. Returns path lists.

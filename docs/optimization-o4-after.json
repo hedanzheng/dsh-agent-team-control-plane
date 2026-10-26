@@ -1,0 +1,104 @@
+{
+  "phase": "O4-A after",
+  "measuredAt": "2026-10-26T10:41:11.835Z",
+  "node": "v24.15.0",
+  "platform": "win32/x64",
+  "gcExposed": true,
+  "scales": [
+    {
+      "files": 100,
+      "contentBytes": 25600,
+      "legacyPhases": {
+        "readdirMs": 0.228,
+        "lstatMs": 1.676,
+        "readHashMs": 5.504,
+        "entries": 102,
+        "files": 100,
+        "bytes": 25600,
+        "totalMs": 8.431
+      },
+      "realScanner": {
+        "medianMs": 18.01,
+        "maxEventLoopLagMs": 13.112,
+        "medianRssBytes": 70152192,
+        "baselineJsonBytes": 13491
+      },
+      "asyncScanner": {
+        "medianMs": 51.824,
+        "maxEventLoopLagMs": 10.457,
+        "medianRssBytes": 77537280,
+        "baselineJsonBytes": 13491
+      },
+      "sqliteBaselineWriteMedianMs": 1.395
+    },
+    {
+      "files": 1000,
+      "contentBytes": 256000,
+      "legacyPhases": {
+        "readdirMs": 0.902,
+        "lstatMs": 13.816,
+        "readHashMs": 46.21,
+        "entries": 1011,
+        "files": 1000,
+        "bytes": 256000,
+        "totalMs": 65.189
+      },
+      "realScanner": {
+        "medianMs": 168.468,
+        "maxEventLoopLagMs": 163.55,
+        "medianRssBytes": 74756096,
+        "baselineJsonBytes": 135891
+      },
+      "asyncScanner": {
+        "medianMs": 212.225,
+        "maxEventLoopLagMs": 11.433,
+        "medianRssBytes": 83345408,
+        "baselineJsonBytes": 135891
+      },
+      "sqliteBaselineWriteMedianMs": 1.608
+    },
+    {
+      "files": 10000,
+      "contentBytes": 2560000,
+      "legacyPhases": {
+        "readdirMs": 10.012,
+        "lstatMs": 137.8,
+        "readHashMs": 453.541,
+        "entries": 10101,
+        "files": 10000,
+        "bytes": 2560000,
+        "totalMs": 639.164
+      },
+      "realScanner": {
+        "medianMs": 1595.97,
+        "maxEventLoopLagMs": 1599.196,
+        "medianRssBytes": 123101184,
+        "baselineJsonBytes": 1377891
+      },
+      "asyncScanner": {
+        "medianMs": 1695.004,
+        "maxEventLoopLagMs": 12.069,
+        "medianRssBytes": 131575808,
+        "baselineJsonBytes": 1377891
+      },
+      "sqliteBaselineWriteMedianMs": 6.21
+    }
+  ],
+  "largeFile": {
+    "sizeBytes": 67108864,
+    "sync": {
+      "ms": 40.136,
+      "maxEventLoopLagMs": 35.265,
+      "peakRssBytes": 166707200,
+      "entries": 1,
+      "baselineJsonBytes": 133
+    },
+    "async": {
+      "ms": 73.871,
+      "maxEventLoopLagMs": 14.138,
+      "peakRssBytes": 166203392,
+      "entries": 1,
+      "baselineJsonBytes": 133
+    }
+  }
+}
