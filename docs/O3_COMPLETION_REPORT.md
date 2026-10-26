@@ -30,4 +30,4 @@ L 规模下 `httpOverview` 为 598,644 B、28 SQL、11.393 ms；单 Task 明细�
 - GET 新视图的未认证请求 401；legacy full 可读；Activity 后续页不调用 facets；mutation 新版本可用于紧接着第二次操作，旧版本被拒绝。
 - Panel 组件测试证明 Task 完整 Run 历史与治理历史仅在用户展开时请求；原 O1/O2 跨项目切换、草稿隔离和风险门禁测试仍通过。
 - 最终 `npm test`：**126/126** 通过，0 fail，退出码 0；`npm run test:demo`：**2/2** 通过，退出码 0；`npm run pack:check`：23 个包内文件 dry-run 通过，退出码 0；`node --check client.js`、`node --check src/host/store.js`、`node --check src/host/http-router.js` 与 `git diff --check` 通过。
-- 自动化结果以最终验收命令为准；Desktop GUI 的视觉与实际点击验收尚未在 O3 完成，不能由组件/路由测试代替。当前 Desktop Profile 仍安装 O2 版本；O3 的源代码与 GitHub 提交完成后，真机发布属于后续阶段。
+- 自动化结果以最终验收命令为准；O3 已安装到 Desktop Profile，安装哈希、Host 路由与 SQLite 状态见 `docs/O3_DESKTOP_DEPLOYMENT.md`。Desktop GUI 的视觉与实际点击验收尚未完成，不能由组件/路由测试代替。
