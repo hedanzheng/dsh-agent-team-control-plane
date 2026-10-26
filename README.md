@@ -26,6 +26,10 @@ An **A-version MVP** control-plane plugin for DeepSeek Harness Desktop. It turns
 - Nine Host-backed `agent_team_*` tools let the PL read and update authoritative state, answer Worker Requests, cancel superseded Tasks, and dispatch a real independent Reviewer Run
 - Worker Runs require a preselected Human-approved verification command; only the Human Owner can explicitly accept a PARTIAL/failed-evidence Result from the console
 - PL state reads return compact summaries by default and provide focused per-Task detail instead of repeatedly loading complete Run/Evidence history
+- The overview separates Human actions, PL/Reviewer queues, and blockers; cross-project actions first resolve the target Project
+- Task/governance history loads on demand, with per-record Request/Review drafts and compact overview/detail endpoints
+- Bounded refresh runs for active Worker, Review, or Request work; idle/hidden panels avoid high-frequency polling, and Activity paging does not recompute facets
+- Workspace scope auditing still hashes every file, but a bounded worker thread keeps the Host event loop responsive and fails closed on scan errors
 - The PL only interviews, plans, orchestrates, and reviews; implementation must flow through formal Tasks, Worker assignment, and one-shot Runs
 - Host-owned SQLite state for Charter, Agents, Tasks, Runs, Results, Evidence, Requests, Responses, Reviews, Findings, Plan Checks, Decisions, and Activity
 - DSH-managed subagent Worker activations (local `fork`/`spawn` or external providers) with explicit Checkpoint + new Run continuation
@@ -61,6 +65,8 @@ npm pack --dry-run
 ```
 
 The repository contains no credentials, Harness profiles, runtime caches, or captured control-plane databases.
+
+Automated and synthetic O1–O5 measurements are in `docs/optimization-results.md`; authenticated desktop acceptance is reported separately in `docs/O6_COMPLETION_REPORT.md`.
 
 ## Repository layout
 

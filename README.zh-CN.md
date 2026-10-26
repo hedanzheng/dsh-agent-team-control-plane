@@ -26,6 +26,10 @@
 - PL 对话通过九个 Host-backed `agent_team_*` 工具读取与更新真实控制面状态，可回复 Worker Request、取消被取代的 Task，并可派发真实的独立 Reviewer Run
 - Worker Run 必须预选 Human 批准的验证命令；PARTIAL/失败证据只允许 Human Owner 在控制台明确接受风险，避免 Task 无入口地卡在 SUBMITTED
 - PL 状态读取默认返回紧凑摘要，需要诊断时再按 Task 读取明细，避免反复载入完整 Run/Evidence 历史
+- 总览区分 Human 待办、PL/Reviewer 队列与阻塞项；跨项目待办先核实目标 Project，再进入对应审批
+- Task 与审批历史按需展开，Request/Review 草稿按各自记录隔离；总览只取摘要，单 Task/历史明细按需读取
+- 活跃 Worker、Review 或 Request 时有界刷新；空闲/隐藏窗口不持续高频拉取，Activity 的后续分页不重复统计筛选项
+- 工作区仍完整哈希审计，但扫描移至有界 Worker Thread，失败时不把不完整快照当作可信证据
 - PL 只负责访谈、计划、编排与 Review；实现工作必须创建正式 Task、指派 Worker 并启动 one-shot Run
 - Host/SQLite 统一持久化 Charter、Agent、Task、Run、Result、Evidence、Request、Response、Review、Finding、Plan Check、Decision 与 Activity
 - 通过 DSH 托管 subagent activation 启动 Worker（本地 `fork`/`spawn` 或外部 provider），以 Checkpoint + 新 Run 恢复工作
@@ -61,6 +65,8 @@ npm pack --dry-run
 ```
 
 仓库不包含凭据、Harness Profile、Runtime 缓存或实测控制面数据库。
+
+O1–O5 的自动化与合成性能记录见 `docs/optimization-results.md`；真实桌面已认证操作按 `docs/O6_COMPLETION_REPORT.md` 单独标注，不以单元测试代替。
 
 ## 目录
 

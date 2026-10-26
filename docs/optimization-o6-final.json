@@ -1,0 +1,365 @@
+{
+  "kind": "O0 synthetic baseline",
+  "measuredAt": "2026-10-26T13:48:34.086Z",
+  "node": "v24.15.0",
+  "platform": "win32/x64",
+  "gcExposed": true,
+  "database": [
+    {
+      "scale": "S",
+      "records": {
+        "name": "S",
+        "tasks": 10,
+        "runs": 20,
+        "activities": 200,
+        "results": 20,
+        "evidence": 20,
+        "verificationRuns": 20,
+        "reviews": 5,
+        "requests": 2,
+        "responses": 2,
+        "dependencies": 9
+      },
+      "sqliteAndWalBytes": 1186568,
+      "snapshot": {
+        "medianMs": 1.356,
+        "sqlCalls": 32,
+        "medianJsonBytes": 46518,
+        "medianRssBytes": 58478592,
+        "rangeMs": [
+          1.283,
+          1.429
+        ]
+      },
+      "overview": {
+        "medianMs": 0.894,
+        "sqlCalls": 28,
+        "medianJsonBytes": 17205,
+        "medianRssBytes": 58527744,
+        "rangeMs": [
+          0.719,
+          1.107
+        ]
+      },
+      "httpOverview": {
+        "medianMs": 0.756,
+        "sqlCalls": 28,
+        "medianJsonBytes": 17224,
+        "medianRssBytes": 58736640,
+        "rangeMs": [
+          0.682,
+          1.141
+        ]
+      },
+      "plDefault": {
+        "medianMs": 0.883,
+        "sqlCalls": 30,
+        "medianJsonBytes": 7516,
+        "medianRssBytes": 58728448,
+        "rangeMs": [
+          0.772,
+          0.904
+        ]
+      },
+      "taskList": {
+        "medianMs": 0.128,
+        "sqlCalls": 2,
+        "medianJsonBytes": 4376,
+        "medianRssBytes": 58523648,
+        "rangeMs": [
+          0.123,
+          0.207
+        ]
+      },
+      "taskDetail": {
+        "medianMs": 0.32,
+        "sqlCalls": 10,
+        "medianJsonBytes": 4376,
+        "medianRssBytes": 58703872,
+        "rangeMs": [
+          0.306,
+          0.354
+        ]
+      },
+      "historyFirstPage": {
+        "medianMs": 0.238,
+        "sqlCalls": 1,
+        "medianJsonBytes": 13635,
+        "medianRssBytes": 58826752,
+        "rangeMs": [
+          0.222,
+          0.24
+        ]
+      },
+      "activityFirstPage": {
+        "medianMs": 0.161,
+        "sqlCalls": 1,
+        "medianJsonBytes": 12282,
+        "medianRssBytes": 58830848,
+        "rangeMs": [
+          0.148,
+          0.261
+        ]
+      },
+      "activityFacets": {
+        "medianMs": 0.088,
+        "sqlCalls": 2,
+        "medianJsonBytes": 176,
+        "medianRssBytes": 58896384,
+        "rangeMs": [
+          0.077,
+          0.115
+        ]
+      }
+    },
+    {
+      "scale": "M",
+      "records": {
+        "name": "M",
+        "tasks": 100,
+        "runs": 300,
+        "activities": 5000,
+        "results": 300,
+        "evidence": 300,
+        "verificationRuns": 300,
+        "reviews": 75,
+        "requests": 20,
+        "responses": 20,
+        "dependencies": 99
+      },
+      "sqliteAndWalBytes": 8941080,
+      "snapshot": {
+        "medianMs": 5.899,
+        "sqlCalls": 32,
+        "medianJsonBytes": 588467,
+        "medianRssBytes": 66527232,
+        "rangeMs": [
+          5.545,
+          7.008
+        ]
+      },
+      "overview": {
+        "medianMs": 1.886,
+        "sqlCalls": 28,
+        "medianJsonBytes": 123214,
+        "medianRssBytes": 67731456,
+        "rangeMs": [
+          1.643,
+          2.103
+        ]
+      },
+      "httpOverview": {
+        "medianMs": 1.797,
+        "sqlCalls": 28,
+        "medianJsonBytes": 123233,
+        "medianRssBytes": 67526656,
+        "rangeMs": [
+          1.668,
+          1.887
+        ]
+      },
+      "plDefault": {
+        "medianMs": 2.028,
+        "sqlCalls": 30,
+        "medianJsonBytes": 52381,
+        "medianRssBytes": 67772416,
+        "rangeMs": [
+          1.843,
+          2.14
+        ]
+      },
+      "taskList": {
+        "medianMs": 0.477,
+        "sqlCalls": 2,
+        "medianJsonBytes": 43896,
+        "medianRssBytes": 67223552,
+        "rangeMs": [
+          0.46,
+          0.532
+        ]
+      },
+      "taskDetail": {
+        "medianMs": 0.408,
+        "sqlCalls": 10,
+        "medianJsonBytes": 6326,
+        "medianRssBytes": 67264512,
+        "rangeMs": [
+          0.372,
+          0.556
+        ]
+      },
+      "historyFirstPage": {
+        "medianMs": 0.536,
+        "sqlCalls": 1,
+        "medianJsonBytes": 34195,
+        "medianRssBytes": 67424256,
+        "rangeMs": [
+          0.511,
+          0.937
+        ]
+      },
+      "activityFirstPage": {
+        "medianMs": 0.142,
+        "sqlCalls": 1,
+        "medianJsonBytes": 12533,
+        "medianRssBytes": 67424256,
+        "rangeMs": [
+          0.127,
+          0.166
+        ]
+      },
+      "activityFacets": {
+        "medianMs": 0.584,
+        "sqlCalls": 2,
+        "medianJsonBytes": 181,
+        "medianRssBytes": 67424256,
+        "rangeMs": [
+          0.54,
+          0.649
+        ]
+      }
+    },
+    {
+      "scale": "L",
+      "records": {
+        "name": "L",
+        "tasks": 500,
+        "runs": 2000,
+        "activities": 20000,
+        "results": 2000,
+        "evidence": 2000,
+        "verificationRuns": 2000,
+        "reviews": 500,
+        "requests": 100,
+        "responses": 100,
+        "dependencies": 499
+      },
+      "sqliteAndWalBytes": 34648944,
+      "snapshot": {
+        "medianMs": 37.574,
+        "sqlCalls": 32,
+        "medianJsonBytes": 3797129,
+        "medianRssBytes": 103919616,
+        "rangeMs": [
+          35.864,
+          40.829
+        ]
+      },
+      "overview": {
+        "medianMs": 6.974,
+        "sqlCalls": 28,
+        "medianJsonBytes": 598625,
+        "medianRssBytes": 114880512,
+        "rangeMs": [
+          6.42,
+          7.533
+        ]
+      },
+      "httpOverview": {
+        "medianMs": 6.759,
+        "sqlCalls": 28,
+        "medianJsonBytes": 598644,
+        "medianRssBytes": 114958336,
+        "rangeMs": [
+          6.614,
+          6.764
+        ]
+      },
+      "plDefault": {
+        "medianMs": 7.364,
+        "sqlCalls": 30,
+        "medianJsonBytes": 254894,
+        "medianRssBytes": 114327552,
+        "rangeMs": [
+          7.257,
+          7.754
+        ]
+      },
+      "taskList": {
+        "medianMs": 2.23,
+        "sqlCalls": 2,
+        "medianJsonBytes": 221484,
+        "medianRssBytes": 114294784,
+        "rangeMs": [
+          2.089,
+          2.373
+        ]
+      },
+      "taskDetail": {
+        "medianMs": 0.929,
+        "sqlCalls": 10,
+        "medianJsonBytes": 8076,
+        "medianRssBytes": 114073600,
+        "rangeMs": [
+          0.896,
+          0.985
+        ]
+      },
+      "historyFirstPage": {
+        "medianMs": 1.427,
+        "sqlCalls": 1,
+        "medianJsonBytes": 34296,
+        "medianRssBytes": 114159616,
+        "rangeMs": [
+          1.216,
+          1.542
+        ]
+      },
+      "activityFirstPage": {
+        "medianMs": 0.137,
+        "sqlCalls": 1,
+        "medianJsonBytes": 12784,
+        "medianRssBytes": 114159616,
+        "rangeMs": [
+          0.135,
+          0.354
+        ]
+      },
+      "activityFacets": {
+        "medianMs": 5.872,
+        "sqlCalls": 2,
+        "medianJsonBytes": 184,
+        "medianRssBytes": 114159616,
+        "rangeMs": [
+          5.684,
+          6.091
+        ]
+      }
+    }
+  ],
+  "workspace": [
+    {
+      "files": 100,
+      "contentBytes": 25600,
+      "medianMs": 18.681,
+      "rangeMs": [
+        18.629,
+        18.984
+      ],
+      "medianRssBytes": 112697344,
+      "baselineJsonBytes": 13491
+    },
+    {
+      "files": 1000,
+      "contentBytes": 256000,
+      "medianMs": 206.819,
+      "rangeMs": [
+        204.276,
+        246.26
+      ],
+      "medianRssBytes": 113831936,
+      "baselineJsonBytes": 135891
+    },
+    {
+      "files": 10000,
+      "contentBytes": 2560000,
+      "medianMs": 1883.581,
+      "rangeMs": [
+        1857.13,
+        1927.129
+      ],
+      "medianRssBytes": 177917952,
+      "baselineJsonBytes": 1377891
+    }
+  ]
+}

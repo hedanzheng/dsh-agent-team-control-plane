@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased - 2026-10-26 (O1–O5 optimization candidate)
+
+- Reworked the overview into Human actions, PL/Reviewer queues, blockers, and Host-reported Agent/Task state. Cross-Project actions now load and verify the target Project before switching.
+- Collapsed Task/governance technical history behind on-demand details, isolated Request/Review drafts, and kept verification-command and Human risk gates visible.
+- Added compact Host overview, per-Task detail, and paginated history reads; PL default state no longer builds a complete Snapshot. The legacy full diagnostic view remains explicit.
+- Moved complete workspace hashing to a bounded worker thread with fail-closed scan errors and concurrent-mutation detection. Total wall-clock scan time may rise; the measured gain is Host responsiveness, not faster full scans. O4-B caching/cleanup was not implemented.
+- Reduced idle Panel/Request polling, added Review/Request-only refresh, kept Activity facets off subsequent pages, and discarded stale cross-Project/filter responses. No new LLM polling, database migration, provider pairing, or version-B features were added.
+- Automated suites and O5 desktop package/Host-route smoke passed; authenticated desktop GUI acceptance remains pending and this section is not a final release tag.
+
 ## 0.6.1 - 2026-10-25
 
 - Blocked Panel and PL-tool Worker Runs before launch unless at least one Human-approved verification command ID is selected, eliminating accidental permanently-PARTIAL submissions.
