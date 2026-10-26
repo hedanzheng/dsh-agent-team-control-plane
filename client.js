@@ -66,6 +66,16 @@ window.__ModuleLoader__.load({
       return payload.data;
     }
 
+    async function requestSnapshot(projectId = '') {
+      const response = await fetch(projectId ? `${ROUTE}?projectId=${encodeURIComponent(projectId)}` : ROUTE);
+      const payload = await response.json();
+      if (!response.ok || payload.ok !== true) throw new Error(payload.error?.message || `HTTP ${response.status}`);
+      if (projectId && payload.data?.selected?.project?.id !== projectId) {
+        throw new Error(`Host 未返回 Project ${projectId} 的状态，已保留原项目`);
+      }
+      return payload.data;
+    }
+
     async function requestActivityPage({ projectId, limit = 50, cursor = null, actorId = '', eventType = '', taskId = '' }) {
       const query = new URLSearchParams({ view: 'activity', projectId, limit: String(limit) });
       if (cursor?.createdAt && cursor?.id) {
@@ -774,90 +784,123 @@ window.__ModuleLoader__.load({
           loading && items.length === 0 && h('div', { style: styles.card }, '正在读取活动记录…')));
     }
 
-    // R5: Dashboard landing view. Aggregates project health, pending
-    // approvals, active runs, findings and recent activity into a single
-    // overview so the owner sees "what needs attention now" first.
-    function DashboardView({ data, selected, onNavigate }) {
+    // O1: describe only Host-reported work. A launch mode is not a model ID,
+    // and an idle Agent is not evidence of a background model process.
+    function DashboardView({ data, selected, onNavigate, busy }) {
       const projects = data?.projects || [];
-      const scopedTasks = selected?.tasks?.filter((task) => task.status !== 'CANCELLED') || [];
+      const tasks = selected?.tasks || [];
+      const projectActive = selected?.project?.status === 'ACTIVE';
+      const scopedTasks = tasks.filter((task) => task.status !== 'CANCELLED');
       const verified = scopedTasks.filter((task) => task.status === 'VERIFIED').length;
-      const openFindings = (selected?.findings || []).filter((finding) => finding.status !== 'CLOSED').length;
-      const openRequests = (selected?.requests || []).filter((item) => ['PENDING', 'IN_PROGRESS'].includes(item.status)).length;
-      const pendingPlanChecks = (selected?.planChecks || []).filter((item) => item.status === 'PENDING').length;
+      const taskById = new Map(tasks.map((task) => [task.id, task]));
+      const runtimes = new Map((data?.runtimes || []).map((runtime) => [runtime.providerKey, runtime]));
       const activeRuns = (selected?.taskRuns || []).filter((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
-      const submittedTasks = (selected?.tasks || []).filter((task) => task.status === 'SUBMITTED');
-      const waitingTasks = (selected?.tasks || []).filter((task) => task.status === 'WAITING');
+      const latestRuns = new Map((selected?.taskRuns || []).map((run) => [run.taskId, run]));
+      const latestReviewRuns = new Map((selected?.reviewRuns || []).map((run) => [run.taskId, run]));
+      const agents = (selected?.agents || []).filter((agent) => agent.status !== 'REPLACED');
+      const humanProjects = projects.filter((project) => ['CHARTER_PENDING_APPROVAL', 'TEAM_PENDING_APPROVAL'].includes(project.status));
+      const interviewProjects = projects.filter((project) => project.status === 'CHARTER_INTERVIEW');
+      const submittedTasks = tasks.filter((task) => task.status === 'SUBMITTED');
+      const reviewerReady = (task) => task.reviewPolicy !== 'REVIEWER_PL' || (selected?.reviews || []).some((review) =>
+        review.taskId === task.id && review.resultId === task.resultId && review.reviewerRole === 'REVIEWER' && review.decision === 'APPROVE');
+      const incompleteEvidence = (task) => {
+        const result = (selected?.results || []).find((item) => item.id === task.resultId);
+        return result?.outcome !== 'SUCCESS' || (selected?.evidence || []).some((item) => item.resultId === task.resultId && item.status === 'FAILED');
+      };
+      const riskTasks = projectActive ? submittedTasks.filter((task) => reviewerReady(task) && incompleteEvidence(task)) : [];
+      const reviewerTasks = projectActive ? submittedTasks.filter((task) => !reviewerReady(task)) : [];
+      const plTasks = projectActive ? submittedTasks.filter((task) => reviewerReady(task) && !incompleteEvidence(task)) : [];
+      const leadId = selected?.project?.leadAgentId;
+      const reviewerIds = new Set(agents.filter((agent) => agent.role === 'REVIEWER').map((agent) => agent.id));
+      const openRequests = (selected?.requests || []).filter((item) => ['PENDING', 'IN_PROGRESS'].includes(item.status));
+      const reviewRequests = projectActive ? openRequests.filter((item) => item.toAgentId === leadId || reviewerIds.has(item.toAgentId)) : [];
+      const otherRequests = projectActive ? openRequests.filter((item) => !reviewRequests.includes(item)) : [];
+      const planChecks = projectActive ? (selected?.planChecks || []).filter((item) => item.status === 'PENDING') : [];
+      const taskProposals = projectActive ? (selected?.taskProposals || []).filter((item) => item.status === 'PENDING') : [];
+      const waitingTasks = projectActive ? tasks.filter((task) => task.status === 'WAITING') : [];
+      const failedRuns = projectActive ? [...latestRuns.values()].filter((run) =>
+        ['FAILED', 'CANNOT_START', 'UNKNOWN', 'TIMED_OUT'].includes(run.status)
+        && !['VERIFIED', 'CANCELLED'].includes(taskById.get(run.taskId)?.status)) : [];
+      const openFindings = projectActive ? (selected?.findings || []).filter((item) => item.status !== 'CLOSED') : [];
       const recentActivities = [...(selected?.activities || [])].reverse().slice(0, 6);
-      const activeAgents = (selected?.agents || []).filter((agent) => agent.status === 'RUNNING');
       const currentCharter = selected?.charters?.find((charter) => charter.version === selected.project.charterVersion) || selected?.charters?.at(-1);
       const currentMilestone = scopedTasks.find((task) => task.status !== 'VERIFIED')?.title || (scopedTasks.length ? '范围内任务均已完成' : '尚未建立任务');
-      const runtimes = data?.runtimes || [];
-      const authorizedRuntimes = runtimes.filter((runtime) => runtime.authorized).length;
-      const pendingApprovalProjects = projects.filter((project) => ['CHARTER_PENDING_APPROVAL', 'TEAM_PENDING_APPROVAL'].includes(project.status));
-      const interviewingProjects = projects.filter((project) => project.status === 'CHARTER_INTERVIEW');
-      const statCard = (label, count, hint, target) => h('button', {
-        type: 'button', 'data-testid': `dashboard-stat-${target}`,
-        onClick: () => onNavigate(target),
-        style: {
-          ...styles.card, flex: '1 1 160px', cursor: 'pointer', textAlign: 'left',
-          background: 'var(--dsw-alias-surface-raised)',
-        },
-      },
-        h('div', { style: { ...styles.muted } }, label),
-        h('div', { style: { fontSize: 24, fontWeight: 700, marginTop: 4 } }, count),
-        h('div', { style: { ...styles.muted, marginTop: 2 } }, hint));
-      const needsAttention = openFindings + openRequests + pendingPlanChecks + submittedTasks.length
-        + pendingApprovalProjects.length + interviewingProjects.length + waitingTasks.length;
+      const goto = (view, projectId = selected?.project?.id) => onNavigate(view, projectId);
+      const teamStatus = (agent) => {
+        const run = activeRuns.find((item) => item.agentId === agent.id);
+        const reviewRun = [...latestReviewRuns.values()].find((item) => item.reviewerAgentId === agent.id && ['STARTING', 'RUNNING'].includes(item.status));
+        const disagree = agent.currentTaskId && run && agent.currentTaskId !== run.taskId;
+        const task = !disagree && taskById.get(agent.currentTaskId || run?.taskId || reviewRun?.taskId);
+        if (task) return `${task.title} · ${taskStatusLabel(task.status)}${task.waiting?.reason ? ` · 等待原因：${task.waiting.reason}` : ''}`;
+        if (agent.status === 'RUNNING' || run || reviewRun || disagree) return '当前任务未知';
+        if (agent.role === 'PROJECT_LEAD' && ['CHARTER_PENDING_APPROVAL', 'TEAM_PENDING_APPROVAL'].includes(selected.project.status)) return '等待 Human 批准';
+        if (agent.role === 'PROJECT_LEAD' && plTasks.length) return `${plTasks.length} 个 Task 待 PL 审核（不代表模型正在运行）`;
+        if (agent.role === 'REVIEWER' && reviewerTasks.length) return `${reviewerTasks.length} 个 Task 待独立审核（不代表模型正在运行）`;
+        return agent.currentTaskId ? '当前任务未知' : '当前未占用 Task';
+      };
+      const attentionRow = (label, count, view, testId) => count > 0 && h('div', { style: { ...styles.row, justifyContent: 'space-between', marginTop: 6 } },
+        h('span', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, `${label} · ${count}`),
+        h(Button, { disabled: busy, 'data-testid': testId, onClick: () => goto(view) }, '查看'));
       return h('section', { style: styles.section, 'aria-labelledby': 'dashboard-heading', 'data-testid': 'view-dashboard' },
-        h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-          h('strong', { id: 'dashboard-heading' }, '总览'),
-          h('span', { style: styles.tag }, needsAttention > 0 ? `${needsAttention} 项待处理` : '暂无待处理事项')),
+        h('strong', { id: 'dashboard-heading', style: { fontSize: 16 } }, '总览 · 当前工作与待处理'),
         !data && h('div', { style: styles.card }, '正在读取 Host 状态…'),
         data && h('div', null,
-          h('div', { style: { ...styles.row, alignItems: 'stretch', marginTop: 8 } },
-            statCard('进行中的项目', projects.filter((project) => project.status === 'ACTIVE').length, '点击查看当前项目', 'project'),
-            statCard('等待配置或批准', projects.filter((project) => ['CHARTER_INTERVIEW', 'CHARTER_PENDING_APPROVAL', 'TEAM_PENDING_APPROVAL'].includes(project.status)).length, '章程 / 团队批准队列', 'approvals'),
-            statCard('已停止（可恢复）', projects.filter((project) => project.status === 'STOPPED').length, '可恢复的项目', 'project'),
-            statCard('已完成', projects.filter((project) => project.status === 'COMPLETED').length, '历史验收记录', 'project')),
-          selected && h('div', { style: { ...styles.card, marginTop: 10 }, 'data-testid': 'dashboard-current-project' },
+          selected ? h('div', { style: styles.card, 'data-testid': 'dashboard-current-project' },
             h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-              h('b', null, `当前项目：${selected.project.name}`),
+              h('b', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, `当前项目：${selected.project.name}`),
               h('span', { style: styles.tag }, projectStatusLabel(selected.project.status))),
-            h('div', { style: { marginTop: 6 } }, h('b', null, '目标：'), currentCharter?.mission || selected.project.initialGoal),
+            h('div', { style: { marginTop: 5, overflowWrap: 'anywhere' } }, h('b', null, '目标：'), currentCharter?.mission || selected.project.initialGoal),
             h('div', { style: styles.muted }, `当前里程碑：${currentMilestone}`),
-            h('div', { style: { ...styles.muted, marginTop: 4 } },
-              `任务验收 ${verified}/${scopedTasks.length}`
-              + (activeAgents.length ? ` · ${activeAgents.length} 个 Agent 工作中` : '')
-              + (activeRuns.length ? ` · ${activeRuns.length} 个运行中` : '')
-              + (submittedTasks.length ? ` · ${submittedTasks.length} 个待审核` : '')
-              + (waitingTasks.length ? ` · ${waitingTasks.length} 个等待处理` : '')
-              + (openFindings ? ` · ${openFindings} 条未关闭 Finding` : '')
-              + (openRequests ? ` · ${openRequests} 个待响应 Request` : '')
-              + (pendingPlanChecks ? ` · ${pendingPlanChecks} 个 Plan Check 待处理` : '')),
-            h('div', { style: { ...styles.row, marginTop: 8 } },
-              h(Button, { 'data-testid': 'dashboard-goto-tasks', onClick: () => onNavigate('tasks') }, '查看任务'),
-              h(Button, { 'data-testid': 'dashboard-goto-approvals', onClick: () => onNavigate('approvals') }, '查看审批'),
-              h(Button, { 'data-testid': 'dashboard-goto-activity', onClick: () => onNavigate('activity') }, '查看活动'))),
-          !selected && h('div', { style: styles.card }, '创建并选择 Project 后显示当前项目进度。'),
-          (pendingApprovalProjects.length > 0 || interviewingProjects.length > 0) && h('div', { style: styles.card, 'data-testid': 'dashboard-pending-approvals' },
-            h('b', null, '待办批准'),
-            interviewingProjects.map((project) => h('div', { key: project.id, style: { ...styles.row, justifyContent: 'space-between', marginTop: 6 } },
-              h('span', null, `${project.name} · 需求访谈中`),
-              h(Button, { onClick: () => onNavigate('approvals') }, '去完成访谈'))),
-            pendingApprovalProjects.map((project) => h('div', { key: project.id, style: { ...styles.row, justifyContent: 'space-between', marginTop: 6 } },
-              h('span', null, `${project.name} · ${projectStatusLabel(project.status)}`),
-              h(Button, { onClick: () => onNavigate('approvals') }, '去批准')))),
-          h('div', { style: { ...styles.card, marginTop: 10 }, 'data-testid': 'dashboard-runtime-summary' },
-            h('b', null, '运行环境'),
-            h('div', { style: { ...styles.muted, marginTop: 4 } },
-              `共 ${runtimes.length} 个 · 已授权 ${authorizedRuntimes} 个`
-              + (activeRuns.length ? ` · ${activeRuns.length} 个 Worker Run 运行中` : '')),
-            activeRuns.length > 0 && h('div', { style: styles.muted },
-              activeRuns.map((run) => `${run.id}（${run.status}）`).join('、'))),
+            h('div', { style: { marginTop: 5, fontWeight: 600 }, 'data-testid': 'dashboard-task-progress' }, `已验收 Task ${verified} / 有效 Task ${scopedTasks.length}`),
+            h('div', { style: { ...styles.row, marginTop: 6 } },
+              h(Button, { disabled: busy, 'data-testid': 'dashboard-goto-tasks', onClick: () => goto('tasks') }, '查看任务'),
+              h(Button, { disabled: busy, 'data-testid': 'dashboard-goto-approvals', onClick: () => goto('approvals') }, '查看审批'),
+              h(Button, { disabled: busy, 'data-testid': 'dashboard-goto-activity', onClick: () => goto('activity') }, '查看活动'))) :
+            h('div', { style: styles.card }, '创建并选择 Project 后显示当前项目进度。'),
+          selected && agents.length > 0 && h('div', { style: styles.section, 'data-testid': 'dashboard-team-activity' },
+            h('b', null, `团队当前状态 · ${agents.length}`),
+            h('div', { style: { ...styles.row, alignItems: 'stretch' } }, agents.map((agent) => {
+              const runtime = runtimes.get(agent.providerKey);
+              const role = agent.role === 'PROJECT_LEAD' ? 'PL' : agent.role === 'REVIEWER' ? '独立 Reviewer' : 'Worker';
+              return h('div', { key: agent.id, style: { ...styles.card, flex: '1 1 250px' }, 'data-testid': `dashboard-agent-${agent.id}` },
+                h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
+                  h('b', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, agent.displayName),
+                  h('span', { style: styles.tag }, AGENT_STATUS_LABELS[agent.status] || agent.status)),
+                h('div', { style: styles.muted }, `${role} · 后端：${runtime?.displayName || agent.providerKey}`),
+                h('div', { style: styles.muted }, `Provider：${agent.providerKey}${agent.providerKey.startsWith('subagent:') ? ' · 实际模型：未报告' : ''}`),
+                h('div', { style: { marginTop: 5, overflowWrap: 'anywhere' } }, teamStatus(agent)));
+            }))),
+          h('div', { style: { ...styles.row, alignItems: 'stretch' }, 'data-testid': 'dashboard-attention-groups' },
+            h('div', { style: { ...styles.card, flex: '1 1 250px' }, 'data-testid': 'dashboard-human-queue' },
+              h('b', null, `Human 待审批 · ${humanProjects.length + riskTasks.length}`),
+              humanProjects.map((project) => h('div', { key: project.id, style: { ...styles.row, justifyContent: 'space-between', marginTop: 6 } },
+                h('span', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, `${project.name} · ${projectStatusLabel(project.status)}`),
+                h(Button, { disabled: busy, 'aria-label': `处理 ${project.name} 的${projectStatusLabel(project.status)}`, 'data-testid': `dashboard-approve-${project.id}`, onClick: () => goto('approvals', project.id) }, '去批准'))),
+              riskTasks.length > 0 && h('div', { style: { marginTop: 6 } }, `Host 验证不完整，待 Owner 决定是否接受风险：${riskTasks.length}`),
+                riskTasks.length > 0 && h(Button, { disabled: busy, onClick: () => goto('approvals') }, '查看风险验收'),
+                humanProjects.length + riskTasks.length === 0 && h('div', { style: styles.muted }, '暂无待 Human 审批事项')),
+            h('div', { style: { ...styles.card, flex: '1 1 250px' }, 'data-testid': 'dashboard-agent-queue' },
+              h('b', null, `PL / Reviewer 工作队列 · ${plTasks.length + reviewerTasks.length + reviewRequests.length + planChecks.length + taskProposals.length}`),
+              attentionRow('待 PL 审核的 Task', plTasks.length, 'approvals', 'dashboard-pl-reviews'),
+              attentionRow('待独立 Reviewer 审核的 Task', reviewerTasks.length, 'approvals', 'dashboard-reviewer-reviews'),
+              attentionRow('待 Agent 回复的 Request', reviewRequests.length, 'approvals', 'dashboard-agent-requests'),
+              attentionRow('待 PL 完成的 Plan Check', planChecks.length, 'approvals', 'dashboard-plan-checks'),
+              attentionRow('待 PL 决定的 Task 提案', taskProposals.length, 'tasks', 'dashboard-task-proposals'),
+              plTasks.length + reviewerTasks.length + reviewRequests.length + planChecks.length + taskProposals.length === 0 && h('div', { style: styles.muted }, '暂无待 PL / Reviewer 处理事项')),
+            h('div', { style: { ...styles.card, flex: '1 1 250px' }, 'data-testid': 'dashboard-blockers' },
+              h('b', null, `阻塞 / 异常提醒 · ${waitingTasks.length + failedRuns.length + openFindings.length + otherRequests.length + interviewProjects.length}`),
+              waitingTasks.map((task) => h('div', { key: task.id, style: { marginTop: 6, overflowWrap: 'anywhere' } }, `${task.title} · 等待处理${task.waiting?.reason ? `：${task.waiting.reason}` : ''}`)),
+              failedRuns.map((run) => h('div', { key: run.id, style: { marginTop: 6, overflowWrap: 'anywhere' } }, `${taskById.get(run.taskId)?.title || '未知 Task'} · Run ${run.status}${run.error?.code ? `（${run.error.code}）` : ''}`)),
+              attentionRow('未关闭 Finding', openFindings.length, 'approvals', 'dashboard-findings'),
+              attentionRow('待其他 Agent 回复的 Request', otherRequests.length, 'approvals', 'dashboard-other-requests'),
+              interviewProjects.map((project) => h('div', { key: project.id, style: { ...styles.row, justifyContent: 'space-between', marginTop: 6 } },
+                h('span', { style: { minWidth: 0, overflowWrap: 'anywhere' } }, `${project.name} · 访谈尚未完成（不是审批）`),
+                h(Button, { disabled: busy, 'data-testid': `dashboard-interview-${project.id}`, onClick: () => goto('approvals', project.id) }, '查看访谈'))),
+              waitingTasks.length + failedRuns.length + openFindings.length + otherRequests.length + interviewProjects.length === 0 && h('div', { style: styles.muted }, '暂无阻塞或异常'))),
           selected && recentActivities.length > 0 && h('div', { style: { ...styles.card, marginTop: 10 }, 'data-testid': 'dashboard-recent-activity' },
             h('div', { style: { ...styles.row, justifyContent: 'space-between' } },
-              h('b', null, '最近活动'), h(Button, { 'data-testid': 'dashboard-goto-activity-full', onClick: () => onNavigate('activity') }, '全部')),
-            recentActivities.map((item) => h('div', { key: item.id, style: { ...styles.muted, marginTop: 5 } },
+              h('b', null, '最近活动'), h(Button, { disabled: busy, 'data-testid': 'dashboard-goto-activity-full', onClick: () => goto('activity') }, '全部')),
+            recentActivities.map((item) => h('div', { key: item.id, style: { ...styles.muted, marginTop: 5, overflowWrap: 'anywhere' } },
               `${formatDateTime(item.createdAt)} · ${ACTIVITY_LABELS[item.eventType] || item.eventType} · ${item.summary}`)))));
     }
 
@@ -869,29 +912,68 @@ window.__ModuleLoader__.load({
       const [createMode, setCreateMode] = React.useState(false);
       const [selectedProjectId, setSelectedProjectId] = React.useState('');
       const [activeView, setActiveView] = React.useState('dashboard');
+      const [switchingProjectId, setSwitchingProjectId] = React.useState('');
+      const loadSequence = React.useRef(0);
+      const switchingProjectRef = React.useRef('');
       const selected = data?.selected;
       const ownerId = selected?.project?.ownerId || 'authenticated-owner';
 
       const load = React.useCallback(async (projectId = selectedProjectId) => {
-        const response = await fetch(projectId ? `${ROUTE}?projectId=${encodeURIComponent(projectId)}` : ROUTE);
-        const payload = await response.json();
-        if (!response.ok || payload.ok !== true) throw new Error(payload.error?.message || `HTTP ${response.status}`);
-        setData(payload.data);
-        if (!selectedProjectId && payload.data.selected?.project?.id) setSelectedProjectId(payload.data.selected.project.id);
+        if (switchingProjectRef.current) return null;
+        const sequence = ++loadSequence.current;
+        const next = await requestSnapshot(projectId);
+        if (sequence !== loadSequence.current || switchingProjectRef.current) return null;
+        setData(next);
+        if (!selectedProjectId && next.selected?.project?.id) setSelectedProjectId(next.selected.project.id);
+        return next;
       }, [selectedProjectId]);
 
       React.useEffect(() => { load().catch((e) => setError(e.message)); }, [load]);
       React.useEffect(() => {
         const active = data?.selected?.taskRuns?.some((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
-        if (!active) return undefined;
+        if (!active || switchingProjectId || busy) return undefined;
         const timer = setInterval(() => {
-          if (globalThis.document?.visibilityState === 'hidden') return;
+          if (globalThis.document?.visibilityState === 'hidden' || switchingProjectRef.current) return;
           load().catch((e) => setError(e.message));
         }, 3000);
         return () => clearInterval(timer);
-      }, [activeView, data?.selected?.taskRuns?.map((run) => `${run.id}:${run.status}`).join('|'), load]);
+      }, [activeView, data?.selected?.taskRuns?.map((run) => `${run.id}:${run.status}`).join('|'), load, switchingProjectId, busy]);
+
+      const navigate = async (view, projectId = selected?.project?.id) => {
+        if (switchingProjectRef.current) return false;
+        if (!projectId || projectId === selected?.project?.id) {
+          setCreateMode(false);
+          setActiveView(view);
+          return true;
+        }
+        // Keep A selected while fetching B. Commit Project and tab together
+        // only after the Host confirms the B snapshot; an older poll cannot
+        // overwrite B, and a failed switch leaves A's actions bound to A.
+        const sequence = ++loadSequence.current;
+        switchingProjectRef.current = projectId;
+        setSwitchingProjectId(projectId);
+        setError('');
+        try {
+          const next = await requestSnapshot(projectId);
+          if (sequence !== loadSequence.current) return false;
+          setData(next);
+          setSelectedProjectId(projectId);
+          setCreateMode(false);
+          setActiveView(view);
+          return true;
+        } catch (e) {
+          if (sequence === loadSequence.current) setError(`切换 Project 失败：${e.message}`);
+          return false;
+        } finally {
+          if (sequence === loadSequence.current) {
+            switchingProjectRef.current = '';
+            setSwitchingProjectId('');
+          }
+        }
+      };
 
       const act = async (action, body) => {
+        ++loadSequence.current;
         setBusy(true); setError(''); setNotice('');
         try {
           const next = await request(action, body);
@@ -959,8 +1041,8 @@ window.__ModuleLoader__.load({
           ? `负责人身份由 Host 认证：${selected.project.ownerId}`
           : '负责人身份将在创建时由 Host 认证，不接受手工输入。'),
         data.projects.length > 0 && h('label', null, '当前 Project', h('select', {
-          style: styles.input, value: selected?.project?.id || '', 'data-testid': 'project-selector',
-          onChange: (event) => { setSelectedProjectId(event.target.value); setCreateMode(false); },
+          style: styles.input, value: selected?.project?.id || '', disabled: busy || Boolean(switchingProjectId), 'data-testid': 'project-selector',
+          onChange: (event) => { navigate('project', event.target.value); },
         }, projectGroups.map(([label, projects]) => h('optgroup', { key: label, label },
           projects.map((project) => h('option', { key: project.id, value: project.id }, `${project.name} · ${projectStatusLabel(project.status)} · ${project.id}`)))))),
         selected && !createMode && h('div', { style: styles.card, 'data-testid': 'project-summary' },
@@ -1011,10 +1093,12 @@ window.__ModuleLoader__.load({
         h(RuntimeCatalog, { data, ownerId, busy, act }));
 
       let view;
-      if (!data) view = h('div', { style: styles.card },
+      if (switchingProjectId) view = h('div', { role: 'status', style: styles.card, 'data-testid': 'project-switching' },
+        `正在切换到 Project「${data?.projects?.find((item) => item.id === switchingProjectId)?.name || switchingProjectId}」并读取其状态…`);
+      else if (!data) view = h('div', { style: styles.card },
         h('p', null, error ? `Host 状态读取失败：${error}` : '正在读取 Host 状态…'),
         error && h(Button, { 'data-testid': 'retry-load', onClick: () => { setError(''); load().catch((e) => setError(e.message)); } }, '重试'));
-      else if (activeView === 'dashboard') view = h(DashboardView, { data, selected, onNavigate: setActiveView });
+      else if (activeView === 'dashboard') view = h(DashboardView, { data, selected, onNavigate: navigate, busy });
       else if (activeView === 'project') view = projectView;
       else if (activeView === 'agents') view = h('section', { 'aria-labelledby': 'agents-heading', 'data-testid': 'view-agents' },
         h('strong', { id: 'agents-heading', style: { fontSize: 16 } }, 'Agents'),
@@ -1037,12 +1121,12 @@ window.__ModuleLoader__.load({
         h('header', { style: styles.header },
           h('div', { style: { minWidth: 0 } },
             h('strong', { style: { display: 'block', fontSize: 18 } }, 'Agent Team Control Plane'),
-            h('div', { style: styles.muted }, selected ? `${selected.project.name} · ${projectStatusLabel(selected.project.status)}` : 'Project、Agent、Task 与审批控制台')),
+            h('div', { style: { ...styles.muted, overflowWrap: 'anywhere' } }, switchingProjectId ? '正在切换项目…' : selected ? `${selected.project.name} · ${projectStatusLabel(selected.project.status)}` : 'Project、Agent、Task 与审批控制台')),
           h('div', { style: styles.row },
             h(Button, { 'data-testid': 'close-control-plane', onClick: onClose }, '关闭控制台'))),
         h('nav', { style: styles.tabBar, 'aria-label': 'Control Plane views' },
           tabs.map(([id, label]) => h('button', {
-            key: id, type: 'button', 'data-testid': `tab-${id}`, onClick: () => setActiveView(id),
+            key: id, type: 'button', disabled: Boolean(switchingProjectId), 'data-testid': `tab-${id}`, onClick: () => setActiveView(id),
             style: activeView === id
               ? { ...styles.tab, color: 'var(--dsw-alias-content-primary)', background: 'var(--dsw-alias-surface-subtle)', borderColor: 'var(--dsw-alias-border-subtle)', fontWeight: 600 }
               : styles.tab,

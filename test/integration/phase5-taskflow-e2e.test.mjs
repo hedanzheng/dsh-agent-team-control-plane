@@ -287,7 +287,8 @@ test('Phase 5 client exposes all six Host-backed views without credential or cha
   assert.doesNotMatch(source, /open-project-pl-chat|data-testid': 'open-pl-chat/);
   assert.match(source, /useState\('dashboard'\)/);
   assert.match(source, /dashboard-current-project/);
-  assert.match(source, /dashboard-pending-approvals/);
+  // O1 preserves the approval entry but separates Human action from Agent work.
+  assert.match(source, /dashboard-human-queue/);
   assert.match(source, /project-decisions/);
   assert.match(source, /record-project-decision/);
   assert.doesNotMatch(source, /Approved Decisions/);
