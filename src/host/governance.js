@@ -17,6 +17,7 @@ export class CollaborationGovernance {
     this.logger = logger;
     this.workspaceSnapshooter = workspaceSnapshooter;
     this.workspaceDiffer = workspaceDiffer;
+    this.requestScheduler = null;
     this.requestJobs = new Map();
     this.reviewJobs = new Map();
   }
@@ -130,6 +131,11 @@ export class CollaborationGovernance {
     return started;
   }
 
+  requestQueueSchedule() {
+    const row = this.store.db.prepare("SELECT COUNT(*) AS count, MIN(deadline_at) AS deadline_at FROM requests WHERE status IN ('PENDING','IN_PROGRESS')").get();
+    return { count: row?.count ?? 0, deadlineAt: row?.deadline_at ?? null };
+  }
+
   startRequestRunInternal(request, recipient) {
     const project = this.controlPlane.requireProject(request.projectId);
     const sourceTask = this.store.getTask(request.sourceTaskId);
@@ -179,6 +185,7 @@ export class CollaborationGovernance {
     } finally {
       if (timeout) clearTimeout(timeout);
       this.adapters.disposeRun(requestRunId);
+      this.requestScheduler?.wake();
     }
   }
 
@@ -284,6 +291,7 @@ export class CollaborationGovernance {
         version=version+1, updated_at=? WHERE id=?`).run(`Waiting for ${target.id}: ${body}`, requestId, resultId, deadlineAt, at, task.id);
       this.controlPlane.activity({ operationId: `${requestId}:created`, projectId: project.id, eventType: 'REQUEST_CREATED', actor: { type: 'agent', id: fromAgent.id }, objectRef: requestId, summary: `${fromAgent.id} requested ${target.id}; mailbox delivery is deferred while recipient is busy`, at });
     });
+    this.requestScheduler?.wake();
     return requestId;
   }
 
@@ -294,7 +302,7 @@ export class CollaborationGovernance {
     if (parsed.terminalKind === 'NEEDS_INPUT' && parsed.requestProposal) {
       try {
         this.createRequest({ project, task: this.store.getTask(task.id), resultId, fromAgent: agent, proposal: parsed.requestProposal });
-        queueMicrotask(() => {
+        if (!this.requestScheduler) queueMicrotask(() => {
           try { this.dispatchPendingRequests(); }
           catch (error) { this.logger.warn(`Request dispatch failed: ${error instanceof Error ? error.message : String(error)}`); }
         });
@@ -376,6 +384,7 @@ export class CollaborationGovernance {
       this.controlPlane.addTaskStateEvent({ taskId: task.id, fromStatus: task.status, toStatus: 'READY', actor, reason: `Request ${request.id} resolved as ${outcome}`, evidenceRefs, at });
       this.controlPlane.activity({ operationId, projectId: project.id, eventType: 'REQUEST_RESOLVED', actor, objectRef: request.id, summary: `${outcome}; source Task returned to READY for a new one-shot Run`, at });
     });
+    this.requestScheduler?.wake();
     return (input.responseView === 'overview' ? this.store.getProjectOverview(project.id) : this.store.snapshot(project.id));
   }
 
@@ -586,6 +595,7 @@ export class CollaborationGovernance {
     } finally {
       if (timeout) clearTimeout(timeout);
       this.adapters.disposeRun(reviewRunId);
+      this.requestScheduler?.wake();
     }
   }
 

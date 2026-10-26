@@ -414,6 +414,7 @@ export class TaskRunCoordinator {
         summary: `Run ${runStatus}; Result ${outcome}; Task ${taskStatus}${verificationUnresolved.length ? `; ${verificationUnresolved.join(' | ').slice(0, 1200)}` : ''}`, at,
       });
     });
+    if (taskStatus !== 'WAITING' && taskStatus !== 'READY') this.governance?.requestScheduler?.wake();
     return { resultId, outcome, taskStatus, runStatus };
   }
 

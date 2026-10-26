@@ -7,6 +7,7 @@ import { ControlPlaneStore } from '../../src/host/store.js';
 import { AgentTeamControlPlane } from '../../src/host/control-plane.js';
 import { CollaborationGovernance } from '../../src/host/governance.js';
 import { TaskRunCoordinator } from '../../src/host/run-coordinator.js';
+import { RequestDispatchScheduler } from '../../src/host/request-scheduler.js';
 import { RESULT_MARKERS } from '../../src/host/result-parser.js';
 
 const OWNER = { type: 'human', id: 'human-owner' };
@@ -340,10 +341,14 @@ test('IDLE external recipient answers a Request through its own bounded one-shot
 
 test('busy recipient keeps a Request queued and dispatches only after becoming IDLE', async () => {
   const fx = await fixture([]);
+  let scheduler;
   try {
     const reviewer = fx.store.listAgents(fx.projectId).find((agent) => agent.role === 'REVIEWER');
     fx.store.db.prepare("UPDATE agents SET provider_key='subagent:codex', status='RUNNING', current_task_id='BUSY-TASK' WHERE id=?").run(reviewer.id);
     const runtimeGovernance = new CollaborationGovernance({ store: fx.store, controlPlane: fx.plane, adapters: fx.adapters, logger: { error() {}, warn() {} } });
+    scheduler = new RequestDispatchScheduler({ governance: runtimeGovernance, logger: { warn() {} }, pendingFallbackMs: 5000 });
+    runtimeGovernance.requestScheduler = scheduler;
+    scheduler.start();
     fx.governance = runtimeGovernance;
     fx.coordinator.governance = runtimeGovernance;
     fx.adapters.outputs.push(needsInput(reviewer.id, 'Answer after the current Task'), responseOutput('Queued recipient answer.'));
@@ -352,13 +357,26 @@ test('busy recipient keeps a Request queued and dispatches only after becoming I
     const request = await waitFor(() => fx.store.listRequests(fx.projectId).at(-1), 'queued Request');
     assert.equal(request.status, 'PENDING');
     assert.equal(fx.store.listRequestRuns(fx.projectId).length, 0);
-    assert.equal(runtimeGovernance.dispatchPendingRequests(), 0);
     fx.store.db.prepare("UPDATE agents SET status='IDLE', current_task_id=NULL WHERE id=?").run(reviewer.id);
-    assert.equal(runtimeGovernance.dispatchPendingRequests(), 1);
+    scheduler.wake();
+    scheduler.wake();
     await waitFor(() => fx.store.listResponses(fx.projectId).length === 1, 'queued response');
+    assert.equal(fx.store.listRequestRuns(fx.projectId).length, 1);
     assert.equal(fx.store.listRequestRuns(fx.projectId).at(-1).status, 'SUCCEEDED');
     assert.equal(fx.store.getTask(task.id).status, 'READY');
     await runtimeGovernance.close();
+  } finally { scheduler?.stop(); await close(fx); }
+});
+
+test('O5 Task Run terminal immediately signals mailbox availability without waiting for fallback timer', async () => {
+  const fx = await fixture([success()]);
+  try {
+    let wakes = 0;
+    fx.governance.requestScheduler = { wake() { wakes += 1; } };
+    const task = createAssigned(fx, 'Release Worker mailbox');
+    await start(fx, task);
+    await waitFor(() => fx.store.getTask(task.id).status === 'SUBMITTED', 'Worker release');
+    assert.ok(wakes >= 1);
   } finally { await close(fx); }
 });
 

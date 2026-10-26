@@ -94,7 +94,7 @@ window.__ModuleLoader__.load({
       return payload.data;
     }
 
-    async function requestActivityPage({ projectId, limit = 50, cursor = null, actorId = '', eventType = '', taskId = '', includeFacets = true }) {
+    async function requestActivityPage({ projectId, limit = 50, cursor = null, actorId = '', eventType = '', taskId = '', includeFacets = true, signal }) {
       const query = new URLSearchParams({ view: 'activity', projectId, limit: String(limit) });
       if (!includeFacets) query.set('includeFacets', 'false');
       if (cursor?.createdAt && cursor?.id) {
@@ -104,7 +104,7 @@ window.__ModuleLoader__.load({
       if (actorId) query.set('actorId', actorId);
       if (eventType) query.set('eventType', eventType);
       if (taskId) query.set('taskId', taskId);
-      const response = await fetch(`${ROUTE}?${query.toString()}`);
+      const response = await fetch(`${ROUTE}?${query.toString()}`, { signal });
       const payload = await response.json();
       if (!response.ok || payload.ok !== true) {
         const error = new Error(payload.error?.message || `HTTP ${response.status}`);
@@ -881,17 +881,30 @@ window.__ModuleLoader__.load({
       const [error, setError] = React.useState('');
       const requestSequence = React.useRef(0);
       const previousProjectId = React.useRef('');
+      const currentProjectId = React.useRef(projectId);
+      const abortRequest = React.useRef(null);
+      const facetsProjectId = React.useRef('');
+      currentProjectId.current = projectId;
       const latestActivityId = selected?.activities?.at(-1)?.id || '';
-      const fetchFirst = async (nextFilters = filters) => {
+      const fetchFirst = async (nextFilters = filters, refreshFacets = false) => {
         if (!projectId) return;
+        abortRequest.current?.abort();
+        const controller = new AbortController();
+        abortRequest.current = controller;
         const sequence = ++requestSequence.current;
         setLoading(true); setError('');
         try {
-          const page = await requestActivityPage({ projectId, limit: 50, ...nextFilters });
-          if (sequence !== requestSequence.current) return;
-          setItems(page.items); setCursor(page.nextCursor); setHasMore(page.hasMore); setFacets(page.facets);
-        } catch (e) { if (sequence === requestSequence.current) setError(`${e.code ? `${e.code}: ` : ''}${e.message}`); }
-        finally { if (sequence === requestSequence.current) setLoading(false); }
+          const includeFacets = refreshFacets || facetsProjectId.current !== projectId;
+          const page = await requestActivityPage({ projectId, limit: 50, ...nextFilters, includeFacets, signal: controller.signal });
+          if (sequence !== requestSequence.current || currentProjectId.current !== projectId) return;
+          setItems(page.items); setCursor(page.nextCursor); setHasMore(page.hasMore);
+          if (includeFacets && page.facets) { setFacets(page.facets); facetsProjectId.current = projectId; }
+        } catch (e) {
+          if (e.name !== 'AbortError' && sequence === requestSequence.current && currentProjectId.current === projectId) setError(`${e.code ? `${e.code}: ` : ''}${e.message}`);
+        } finally {
+          if (abortRequest.current === controller) abortRequest.current = null;
+          if (sequence === requestSequence.current && currentProjectId.current === projectId) setLoading(false);
+        }
       };
       React.useEffect(() => {
         const cleared = { actorId: '', eventType: '', taskId: '' };
@@ -899,29 +912,38 @@ window.__ModuleLoader__.load({
         previousProjectId.current = projectId;
         const nextFilters = projectChanged ? cleared : filters;
         if (projectChanged) {
-          setFilters(cleared); setItems([]); setCursor(null); setHasMore(false); setError('');
+          setFilters(cleared); setItems([]); setCursor(null); setHasMore(false); setFacets({ actors: [], eventTypes: [] }); setError('');
+          facetsProjectId.current = '';
         }
-        if (projectId) fetchFirst(nextFilters);
+        if (projectId) fetchFirst(nextFilters, projectChanged);
+        return () => { ++requestSequence.current; abortRequest.current?.abort(); abortRequest.current = null; };
       }, [projectId, latestActivityId]);
       const applyFilter = (name, value) => {
         const next = { ...filters, [name]: value };
         setFilters(next); setItems([]); setCursor(null); setHasMore(false);
-        fetchFirst(next);
+        fetchFirst(next, true);
       };
       const loadMore = async () => {
         if (!projectId || !cursor || loading) return;
+        abortRequest.current?.abort();
+        const controller = new AbortController();
+        abortRequest.current = controller;
         const sequence = ++requestSequence.current;
         setLoading(true); setError('');
         try {
-          const page = await requestActivityPage({ projectId, limit: 50, cursor, ...filters, includeFacets: false });
-          if (sequence !== requestSequence.current) return;
+          const page = await requestActivityPage({ projectId, limit: 50, cursor, ...filters, includeFacets: false, signal: controller.signal });
+          if (sequence !== requestSequence.current || currentProjectId.current !== projectId) return;
           setItems((current) => {
             const seen = new Set(current.map((item) => item.id));
             return current.concat(page.items.filter((item) => !seen.has(item.id)));
           });
           setCursor(page.nextCursor); setHasMore(page.hasMore);
-        } catch (e) { if (sequence === requestSequence.current) setError(`${e.code ? `${e.code}: ` : ''}${e.message}`); }
-        finally { if (sequence === requestSequence.current) setLoading(false); }
+        } catch (e) {
+          if (e.name !== 'AbortError' && sequence === requestSequence.current && currentProjectId.current === projectId) setError(`${e.code ? `${e.code}: ` : ''}${e.message}`);
+        } finally {
+          if (abortRequest.current === controller) abortRequest.current = null;
+          if (sequence === requestSequence.current && currentProjectId.current === projectId) setLoading(false);
+        }
       };
       const agentName = (id) => selected?.agents?.find((agent) => agent.id === id)?.displayName || id;
       const taskName = (id) => selected?.tasks?.find((task) => task.id === id)?.title || id;
@@ -930,7 +952,7 @@ window.__ModuleLoader__.load({
           h('strong', { id: 'activity-heading' }, '活动记录'),
           h('div', { style: styles.row },
             h('span', { style: styles.tag }, `${items.length}${hasMore ? '+' : ''} 条`),
-            selected && h(Button, { disabled: loading, 'data-testid': 'refresh-activities', onClick: () => fetchFirst(filters) }, '刷新'))),
+            selected && h(Button, { disabled: loading, 'data-testid': 'refresh-activities', onClick: () => fetchFirst(filters, true) }, '刷新'))),
         h('div', { style: { ...styles.muted, marginTop: 6 } }, '按当前 Project 从 Host 分页读取，默认最近 50 条；中文摘要直接可读，技术字段按需展开。'),
         !selected && h('div', { style: styles.card }, '创建并选择 Project 后显示 Host 活动记录。'),
         selected && h('div', { style: { ...styles.row, marginTop: 8 }, 'data-testid': 'activity-filters' },
@@ -1089,31 +1111,60 @@ window.__ModuleLoader__.load({
       const [selectedProjectId, setSelectedProjectId] = React.useState('');
       const [activeView, setActiveView] = React.useState('dashboard');
       const [switchingProjectId, setSwitchingProjectId] = React.useState('');
+      const [isVisible, setIsVisible] = React.useState(globalThis.document?.visibilityState !== 'hidden');
       const loadSequence = React.useRef(0);
+      const loadInFlight = React.useRef(null);
       const switchingProjectRef = React.useRef('');
       const selected = data?.selected;
       const ownerId = selected?.project?.ownerId || 'authenticated-owner';
 
-      const load = React.useCallback(async (projectId = selectedProjectId) => {
-        if (switchingProjectRef.current) return null;
+      const load = React.useCallback((projectId = selectedProjectId, { force = false } = {}) => {
+        if (switchingProjectRef.current) return Promise.resolve(null);
+        if (!force && loadInFlight.current?.projectId === projectId) return loadInFlight.current.promise;
         const sequence = ++loadSequence.current;
-        const next = await requestSnapshot(projectId);
-        if (sequence !== loadSequence.current || switchingProjectRef.current) return null;
-        setData(next);
-        if (!selectedProjectId && next.selected?.project?.id) setSelectedProjectId(next.selected.project.id);
-        return next;
+        const promise = requestSnapshot(projectId).then((next) => {
+          if (sequence !== loadSequence.current || switchingProjectRef.current) return null;
+          setData(next);
+          if (!selectedProjectId && next.selected?.project?.id) setSelectedProjectId(next.selected.project.id);
+          return next;
+        }).catch((error) => {
+          if (sequence !== loadSequence.current || switchingProjectRef.current) return null;
+          throw error;
+        }).finally(() => { if (loadInFlight.current?.promise === promise) loadInFlight.current = null; });
+        loadInFlight.current = { projectId, promise };
+        return promise;
       }, [selectedProjectId]);
 
-      React.useEffect(() => { load().catch((e) => setError(e.message)); }, [load]);
+      React.useEffect(() => { load().catch((e) => setError(e.message)); }, []);
       React.useEffect(() => {
-        const active = data?.selected?.taskRuns?.some((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status));
-        if (!active || switchingProjectId || busy) return undefined;
+        const doc = globalThis.document;
+        if (!doc?.addEventListener) return undefined;
+        const onVisibilityChange = () => {
+          const visible = doc.visibilityState !== 'hidden';
+          setIsVisible(visible);
+          if (visible) load(selectedProjectId, { force: true }).catch((e) => setError(e.message));
+        };
+        doc.addEventListener('visibilitychange', onVisibilityChange);
+        return () => doc.removeEventListener('visibilitychange', onVisibilityChange);
+      }, [load, selectedProjectId]);
+      React.useEffect(() => {
+        const current = data?.selected;
+        const active = current?.project?.status === 'ACTIVE' && (
+          current.taskRuns?.some((run) => ['CREATED', 'STARTING', 'RUNNING'].includes(run.status))
+          || current.reviewRuns?.some((run) => ['STARTING', 'RUNNING'].includes(run.status))
+          || current.requestRuns?.some((run) => ['STARTING', 'RUNNING'].includes(run.status))
+          || current.requests?.some((item) => ['PENDING', 'IN_PROGRESS'].includes(item.status)));
+        if (!active || !isVisible || switchingProjectId || busy) return undefined;
         const timer = setInterval(() => {
-          if (globalThis.document?.visibilityState === 'hidden' || switchingProjectRef.current) return;
+          if (switchingProjectRef.current) return;
           load().catch((e) => setError(e.message));
         }, 3000);
         return () => clearInterval(timer);
-      }, [activeView, data?.selected?.taskRuns?.map((run) => `${run.id}:${run.status}`).join('|'), load, switchingProjectId, busy]);
+      }, [activeView, data?.selected?.taskRuns?.map((run) => `${run.id}:${run.status}`).join('|'),
+        data?.selected?.reviewRuns?.map((run) => `${run.id}:${run.status}`).join('|'),
+        data?.selected?.requestRuns?.map((run) => `${run.id}:${run.status}`).join('|'),
+        data?.selected?.requests?.map((item) => `${item.id}:${item.status}`).join('|'),
+        data?.selected?.project?.status, load, isVisible, switchingProjectId, busy]);
 
       const navigate = async (view, projectId = selected?.project?.id) => {
         if (switchingProjectRef.current) return false;
@@ -1304,10 +1355,15 @@ window.__ModuleLoader__.load({
             h('strong', { style: { display: 'block', fontSize: 18 } }, 'Agent Team Control Plane'),
             h('div', { style: { ...styles.muted, overflowWrap: 'anywhere' } }, switchingProjectId ? '正在切换项目…' : selected ? `${selected.project.name} · ${projectStatusLabel(selected.project.status)}` : 'Project、Agent、Task 与审批控制台')),
           h('div', { style: styles.row },
+            h(Button, { disabled: busy || Boolean(switchingProjectId), 'data-testid': 'refresh-control-plane', onClick: () => load(selectedProjectId, { force: true }).catch((e) => setError(e.message)) }, '刷新'),
             h(Button, { 'data-testid': 'close-control-plane', onClick: onClose }, '关闭控制台'))),
         h('nav', { style: styles.tabBar, 'aria-label': 'Control Plane views' },
           tabs.map(([id, label]) => h('button', {
-            key: id, type: 'button', disabled: Boolean(switchingProjectId), 'data-testid': `tab-${id}`, onClick: () => setActiveView(id),
+            key: id, type: 'button', disabled: Boolean(switchingProjectId), 'data-testid': `tab-${id}`, onClick: () => {
+              if (id === activeView) return;
+              setActiveView(id);
+              load().catch((e) => setError(e.message));
+            },
             style: activeView === id
               ? { ...styles.tab, color: 'var(--dsw-alias-content-primary)', background: 'var(--dsw-alias-surface-subtle)', borderColor: 'var(--dsw-alias-border-subtle)', fontWeight: 600 }
               : styles.tab,

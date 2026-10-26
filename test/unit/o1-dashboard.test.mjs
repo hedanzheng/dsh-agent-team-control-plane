@@ -131,7 +131,10 @@ function panelHarness(fetchImpl) {
     if (typeof node === 'object') return textOf(node.props?.children);
     return String(node);
   }
-  return { settle, byTestId, textOf, sessionCalls, close() { globalThis.fetch = originalFetch; } };
+  return { settle, byTestId, textOf, sessionCalls, close() {
+    for (const cells of hooksByPath.values()) for (const cell of cells) cell?.cleanup?.();
+    globalThis.fetch = originalFetch;
+  } };
 }
 
 function project(id, status) {
@@ -245,14 +248,14 @@ test('O1 a late Project A poll cannot overwrite Project B after cross-project na
     const id = new URL(url, 'http://localhost').searchParams.get('projectId');
     if (id === 'B') return response({ ok: true, data: b });
     aRequests += 1;
-    return aRequests > 2 ? lateA.promise : response({ ok: true, data: a });
+    return aRequests > 1 ? lateA.promise : response({ ok: true, data: a });
   });
   try {
     await harness.settle();
     assert.equal(typeof timerCallback, 'function');
     timerCallback();
     await harness.settle();
-    assert.ok(aRequests > 2);
+    assert.ok(aRequests > 1);
     const switched = await harness.byTestId('dashboard-approve-B').props.onClick();
     assert.equal(switched, true);
     await harness.settle();
@@ -342,5 +345,162 @@ test('O1 stopped Project history is not labeled as a live approval or blocker', 
     assert.match(harness.textOf(harness.byTestId('dashboard-human-queue')), /Human 待审批 · 1/); // Only B charter approval.
     assert.match(harness.textOf(harness.byTestId('dashboard-agent-queue')), /PL \/ Reviewer 工作队列 · 0/);
     assert.match(harness.textOf(harness.byTestId('dashboard-blockers')), /阻塞 \/ 异常提醒 · 0/);
+  } finally { harness.close(); }
+});
+
+test('O5 idle Panel makes one initial overview request and refreshes only on user action', async () => {
+  const a = snapshot(selectedState(project('A', 'ACTIVE')));
+  let gets = 0;
+  let timers = 0;
+  const originalSetInterval = globalThis.setInterval;
+  globalThis.setInterval = () => { timers += 1; return timers; };
+  const harness = panelHarness(async () => { gets += 1; return response({ ok: true, data: a }); });
+  try {
+    await harness.settle();
+    assert.equal(gets, 1);
+    assert.equal(timers, 0);
+    await harness.byTestId('refresh-control-plane').props.onClick();
+    await harness.settle();
+    assert.equal(gets, 2);
+    assert.equal(timers, 0);
+  } finally { harness.close(); globalThis.setInterval = originalSetInterval; }
+});
+
+test('O5 Review-only and Request-only work each refreshes without a Worker Run', async () => {
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  let nextTimer = 0;
+  const timers = new Map();
+  globalThis.setInterval = (fn, ms) => { assert.equal(ms, 3000); const id = ++nextTimer; timers.set(id, fn); return id; };
+  globalThis.clearInterval = (id) => timers.delete(id);
+  try {
+    for (const active of [
+      { reviewRuns: [{ id: 'REVIEW-RUN-1', status: 'RUNNING', taskId: 'TASK-1' }] },
+      { requests: [{ id: 'REQUEST-1', status: 'PENDING', toAgentId: 'PL-A' }] },
+    ]) {
+      const a = snapshot(selectedState(project('A', 'ACTIVE'), active));
+      let gets = 0;
+      const harness = panelHarness(async () => { gets += 1; return response({ ok: true, data: a }); });
+      try {
+        await harness.settle();
+        assert.equal(gets, 1);
+        assert.equal(timers.size, 1);
+        [...timers.values()][0]();
+        await harness.settle();
+        assert.equal(gets, 2);
+      } finally { harness.close(); }
+      assert.equal(timers.size, 0);
+    }
+  } finally { globalThis.setInterval = originalSetInterval; globalThis.clearInterval = originalClearInterval; }
+});
+
+test('O5 hidden Panel pauses polling and refreshes once when visible again', async () => {
+  const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  const listeners = new Map();
+  const timers = new Map();
+  let nextTimer = 0;
+  globalThis.document = {
+    visibilityState: 'visible',
+    addEventListener(name, fn) { listeners.set(name, fn); },
+    removeEventListener(name, fn) { if (listeners.get(name) === fn) listeners.delete(name); },
+  };
+  globalThis.setInterval = (fn) => { const id = ++nextTimer; timers.set(id, fn); return id; };
+  globalThis.clearInterval = (id) => timers.delete(id);
+  const a = snapshot(selectedState(project('A', 'ACTIVE'), { taskRuns: [{ id: 'RUN-1', status: 'RUNNING' }] }));
+  let gets = 0;
+  const harness = panelHarness(async () => { gets += 1; return response({ ok: true, data: a }); });
+  try {
+    await harness.settle();
+    assert.equal(timers.size, 1);
+    globalThis.document.visibilityState = 'hidden';
+    listeners.get('visibilitychange')();
+    await harness.settle();
+    assert.equal(timers.size, 0);
+    assert.equal(gets, 1);
+    globalThis.document.visibilityState = 'visible';
+    listeners.get('visibilitychange')();
+    await harness.settle();
+    assert.equal(gets, 2);
+    assert.equal(timers.size, 1);
+  } finally {
+    harness.close();
+    assert.equal(listeners.size, 0);
+    globalThis.document = originalDocument;
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+  }
+});
+
+test('O5 Activity keeps only the last filter response and skips facets on paging and automatic refresh', async () => {
+  let overview = snapshot(selectedState(project('A', 'ACTIVE'), { activities: [{ id: 'ACT-0' }] }));
+  const slowA = deferred();
+  const activityCalls = [];
+  const page = (items, hasMore = false) => response({ ok: true, data: {
+    projectId: 'A', items, hasMore, nextCursor: hasMore ? { createdAt: '2026-10-26T00:00:00.000Z', id: 'ACT-B-1' } : null,
+    facets: { actors: [{ value: 'AGENT-A', count: 1 }, { value: 'AGENT-B', count: 2 }], eventTypes: [] },
+  } });
+  const harness = panelHarness(async (url) => {
+    const query = new URL(url, 'http://localhost').searchParams;
+    if (query.get('view') !== 'activity') return response({ ok: true, data: overview });
+    activityCalls.push(query.toString());
+    if (query.get('actorId') === 'AGENT-A') return slowA.promise;
+    if (query.get('actorId') === 'AGENT-B' && query.has('cursorId')) return page([{ id: 'ACT-B-2', summary: 'latest B page' }]);
+    if (query.get('actorId') === 'AGENT-B') return page([{ id: 'ACT-B-1', summary: 'selected B event' }], true);
+    return page([{ id: 'ACT-INIT', summary: 'initial event' }]);
+  });
+  try {
+    await harness.settle();
+    harness.byTestId('tab-activity').props.onClick();
+    await harness.settle();
+    const actorFilter = () => harness.byTestId('activity-filters').props.children[0];
+    actorFilter().props.onChange({ target: { value: 'AGENT-A' } });
+    await harness.settle();
+    actorFilter().props.onChange({ target: { value: 'AGENT-B' } });
+    await harness.settle();
+    slowA.resolve(page([{ id: 'ACT-A', summary: 'stale A event' }]));
+    await harness.settle();
+    assert.match(harness.textOf(harness.byTestId('activity-feed')), /selected B event/);
+    assert.doesNotMatch(harness.textOf(harness.byTestId('activity-feed')), /stale A event/);
+    harness.byTestId('load-more-activities').props.onClick();
+    await harness.settle();
+    assert.match(harness.textOf(harness.byTestId('activity-feed')), /latest B page/);
+    assert.match(activityCalls.at(-1), /includeFacets=false/);
+
+    overview = snapshot(selectedState(project('A', 'ACTIVE'), { activities: [{ id: 'ACT-1' }] }));
+    await harness.byTestId('refresh-control-plane').props.onClick();
+    await harness.settle();
+    assert.match(activityCalls.at(-1), /includeFacets=false/);
+  } finally { harness.close(); }
+});
+
+test('O5 a late Activity page from Project A cannot enter Project B', async () => {
+  const a = snapshot(selectedState(project('A', 'ACTIVE'), { activities: [{ id: 'ACT-A-0' }] }));
+  const b = snapshot(selectedState(project('B', 'ACTIVE'), { activities: [{ id: 'ACT-B-0' }] }));
+  b.projects[1] = project('B', 'ACTIVE');
+  const lateA = deferred();
+  const harness = panelHarness(async (url) => {
+    const query = new URL(url, 'http://localhost').searchParams;
+    if (query.get('view') === 'activity') {
+      if (query.get('projectId') === 'A') return lateA.promise;
+      return response({ ok: true, data: { projectId: 'B', items: [{ id: 'ACT-B', summary: 'B only event' }], nextCursor: null, hasMore: false, facets: { actors: [], eventTypes: [] } } });
+    }
+    return response({ ok: true, data: query.get('projectId') === 'B' ? b : a });
+  });
+  try {
+    await harness.settle();
+    harness.byTestId('tab-activity').props.onClick();
+    await harness.settle();
+    harness.byTestId('tab-project').props.onClick();
+    await harness.settle();
+    await harness.byTestId('project-selector').props.onChange({ target: { value: 'B' } });
+    await harness.settle();
+    harness.byTestId('tab-activity').props.onClick();
+    await harness.settle();
+    lateA.resolve(response({ ok: true, data: { projectId: 'A', items: [{ id: 'ACT-A', summary: 'stale A event' }], nextCursor: null, hasMore: false, facets: { actors: [], eventTypes: [] } } }));
+    await harness.settle();
+    assert.match(harness.textOf(harness.byTestId('activity-feed')), /B only event/);
+    assert.doesNotMatch(harness.textOf(harness.byTestId('activity-feed')), /stale A event/);
   } finally { harness.close(); }
 });

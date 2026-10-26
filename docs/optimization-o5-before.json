@@ -1,0 +1,20 @@
+{
+  "measuredAt": "2026-10-26T13:02:44.519Z",
+  "node": "v24.15.0",
+  "platform": "win32",
+  "idle": {
+    "label": "no open Request",
+    "runs": 1000,
+    "elapsedMs": 17.039,
+    "sqlPrepareCalls": 2000,
+    "sqlPerTick": 2
+  },
+  "pending": {
+    "label": "one queued Request, recipient busy",
+    "runs": 1000,
+    "elapsedMs": 140.877,
+    "sqlPrepareCalls": 7000,
+    "sqlPerTick": 7
+  },
+  "legacyTimerIntervalMs": 1000
+}

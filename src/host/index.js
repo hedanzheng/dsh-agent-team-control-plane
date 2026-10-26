@@ -7,6 +7,7 @@ import { TaskRunCoordinator } from './run-coordinator.js';
 import { CollaborationGovernance } from './governance.js';
 import { installPLBridge } from './pl-bridge.js';
 import { createControlPlaneHttpHandler } from './http-router.js';
+import { RequestDispatchScheduler } from './request-scheduler.js';
 
 export const name = 'agent-team-control-plane';
 // R1.1: `connection` provides Host admission (authenticated owner Peer,
@@ -29,6 +30,8 @@ export async function apply(ctx) {
   const adapters = new RuntimeAdapterRegistry(ctx, store);
   const governance = new CollaborationGovernance({ store, controlPlane, adapters, logger: ctx.logger });
   const coordinator = new TaskRunCoordinator({ store, controlPlane, adapters, governance, logger: ctx.logger });
+  const requestScheduler = new RequestDispatchScheduler({ governance, logger: ctx.logger });
+  governance.requestScheduler = requestScheduler;
   const disposePLBridge = installPLBridge(ctx, { controlPlane, coordinator, governance, store, adapters });
 
   try {
@@ -51,14 +54,10 @@ export async function apply(ctx) {
   store.setSystemState('request_run_recovery', { recoveredRequestRuns }, new Date().toISOString());
   store.setSystemState('review_run_recovery', { recoveredReviewRuns }, new Date().toISOString());
   coordinator.startWatchdog();
-  const requestTimer = setInterval(() => {
-    try { governance.timeoutExpiredRequests(); governance.dispatchPendingRequests(); }
-    catch (error) { ctx.logger.warn(`agent-team-control-plane request timeout check failed: ${error instanceof Error ? error.message : String(error)}`); }
-  }, 1000);
-  requestTimer.unref?.();
+  requestScheduler.start();
 
   ctx.effect(() => async () => {
-    clearInterval(requestTimer);
+    requestScheduler.stop();
     disposePLBridge();
     await governance.close();
     await coordinator.close();

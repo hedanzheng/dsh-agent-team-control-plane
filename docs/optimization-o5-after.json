@@ -1,0 +1,34 @@
+{
+  "measuredAt": "2026-10-26T13:09:25.515Z",
+  "node": "v24.15.0",
+  "platform": "win32",
+  "idle": {
+    "label": "no open Request",
+    "runs": 1000,
+    "elapsedMs": 29.313,
+    "sqlPrepareCalls": 2000,
+    "sqlPerTick": 2
+  },
+  "pending": {
+    "label": "one queued Request, recipient busy",
+    "runs": 1000,
+    "elapsedMs": 256.305,
+    "sqlPrepareCalls": 7000,
+    "sqlPerTick": 7
+  },
+  "idleScheduler": {
+    "label": "no open Request",
+    "periodMs": 59999,
+    "timerCallbacks": 2,
+    "sqlPrepareCalls": 6,
+    "executionMs": 0.88
+  },
+  "pendingScheduler": {
+    "label": "one queued Request, recipient busy",
+    "periodMs": 59999,
+    "timerCallbacks": 4,
+    "sqlPrepareCalls": 32,
+    "executionMs": 1.162
+  },
+  "legacyTimerIntervalMs": 1000
+}
