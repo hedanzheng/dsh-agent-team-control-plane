@@ -29,10 +29,10 @@
 
 ## 反向测试与边界
 
-- `test/unit/o4-workspace-scan.test.mjs` 覆盖同步/异步快照一致、新增/修改/删除/重命名/未跟踪/禁区、大小与 mtime 伪装、32 MiB 文件摘要、外部 Junction 不遍历、取消/期限/工作区消失，以及扫描期间 Host 事件循环可响应。
+- `test/unit/o4-workspace-scan.test.mjs` 覆盖同步/异步快照一致、新增/修改/删除/重命名/未跟踪/禁区、大小与 mtime 伪装、32 MiB 文件摘要、外部 Junction 不遍历、取消/期限/工作区消失，以及扫描期间 Host 事件循环可响应。桌面安装探针额外暴露 `--input-type` 被 Worker 继承的问题，现以 `execArgv: []` 修正并加入子进程回归测试。
 - `test/unit/r2-evidence-gates.test.mjs` 覆盖禁止目录和 SQLite 不再静默跳过、未报告的禁区/越界写、Run 前基线失败、扫描中 Project 停止、Run 后扫描失败、验证命令生成越界文件、Reviewer 扫描失败。R2 原 Evidence/Scope/Owner 风险门禁回归保留。
 - Host 扫描不是文件系统隔离；与其他外部进程并发写入时会尽力检测前后不一致并拒绝完整可信结论，不能将某一字节变化必然归因给 Worker。未实现更重的文件系统事务或隔离沙箱。
 
-最终 `npm test` **138/138** 通过，`npm run test:demo` **2/2** 通过，`npm run pack:check` 打包清单 **24 个文件**（包括新的 `workspace-diff-worker.js`），退出码均为 0；`node --check` 关键 JS 与 `git diff --check` 通过。O3 桌面安装见 `docs/O3_DESKTOP_DEPLOYMENT.md`。O4-B 须另经 Human 同意，O5 未开始。
+最终修正提交 `7b8275fd2c8527b79b0dc55d0e6d7f33599ce16d` 的 `npm test` **139/139** 通过，`npm run test:demo` **2/2** 通过，`npm run pack:check` 打包清单 **24 个文件**（包括新的 `workspace-diff-worker.js`），退出码均为 0；`node --check` 关键 JS 与 `git diff --check` 通过。O4-A 已安装到桌面，哈希、Profile pin、数据库及未认证路由证据见 `docs/O4_DESKTOP_DEPLOYMENT.md`；真实 GUI 点击尚未验收。O4-B 须另经 Human 同意，O5 未开始。
 
 实施前逐文件源码快照保存在 `D:\GPT-workspace\_backups\atcp-o4-20261026-183235`；该目录也保存完整测试输出。代码回滚边界为 O3 提交 `7dfd1d495371a19d98938226704d638c1554f4cc`，不需要变更 SQLite schema，也不需要数据迁移。若部署桌面版，先停止 Host，再恢复插件包和 Profile Git pin/lock；本报告不会把源码测试误写成已完成的 GUI 验收。
