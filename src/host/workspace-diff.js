@@ -110,7 +110,10 @@ export function snapshotWorkspace(workspace) {
 export function snapshotWorkspaceAsync(workspace, { signal, timeoutMs = 180000 } = {}) {
   if (signal?.aborted) return Promise.reject(Object.assign(new Error('workspace scan aborted'), { name: 'AbortError', code: 'ABORT_ERR' }));
   return new Promise((resolveSnapshot, rejectSnapshot) => {
-    const worker = new Worker(new URL('./workspace-diff-worker.js', import.meta.url), { workerData: { workspace } });
+    // The Host may itself start through --input-type, --eval, a test runner or
+    // other CLI flags that are invalid for a Worker file. This scanner needs
+    // no inherited execArgv, so start it with a clean Node invocation.
+    const worker = new Worker(new URL('./workspace-diff-worker.js', import.meta.url), { workerData: { workspace }, execArgv: [] });
     let settled = false;
     const finish = (error, entries) => {
       if (settled) return;

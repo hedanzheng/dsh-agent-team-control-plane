@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -108,5 +109,17 @@ test('O4: scan runs outside Host event loop', async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(scanSettled, false);
     assert.equal((await scan).size, 300);
+  } finally { cleanup(root); }
+});
+
+test('O4: scanner Worker does not inherit incompatible Host CLI flags', () => {
+  const root = fixture();
+  try {
+    writeFileSync(join(root, 'probe.txt'), 'ok');
+    const moduleUrl = new URL('../../src/host/workspace-diff.js', import.meta.url).href;
+    const script = `import { snapshotWorkspaceAsync } from ${JSON.stringify(moduleUrl)}; const result = await snapshotWorkspaceAsync(${JSON.stringify(root)}); console.log(result.size);`;
+    const child = spawnSync(process.execPath, ['--input-type=module', '--eval', script], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout.trim(), '1');
   } finally { cleanup(root); }
 });
